@@ -1,32 +1,18 @@
 import vanna as vn
-from vanna.legacy.ollama import Ollama
-from vanna.legacy.chromadb import ChromaDB_VectorStore
+from connections import get_vanna_instance, connect_database, get_schema_query, get_columns_query
 
-class MyVanna(ChromaDB_VectorStore, Ollama):
-    def __init__(self, config=None):
-        ChromaDB_VectorStore.__init__(self, config=config)
-        Ollama.__init__(self, config=config)
+# Initialize dynamic vanna and database connection
+vn = get_vanna_instance()
+connect_database(vn)
 
-vn = MyVanna(config={'model': 'deepseek-coder:6.7b', 'path': './vanna_storage'})
-
-vn.connect_to_postgres(
-    host='localhost',
-    dbname='postgres_air',
-    user='postgres',
-    password='postgres',
-    port=5432
-)
-
-# Train schema automatically
-df = vn.run_sql("SELECT table_name FROM information_schema.tables WHERE table_schema='postgres_air'")
-print("df: ",df)
+# Train schema automatically using dynamic queries
+schema_query = get_schema_query()
+df = vn.run_sql(schema_query)
+print("Tables to train: ", df)
 
 for table in df['table_name']:
-    schema = vn.run_sql(f"""
-        SELECT column_name, data_type
-        FROM information_schema.columns
-        WHERE table_name = '{table}'
-    """)
+    columns_query = get_columns_query(table)
+    schema = vn.run_sql(columns_query)
     
     vn.train(
         documentation=f"Table {table} has columns {schema.to_dict()}"
