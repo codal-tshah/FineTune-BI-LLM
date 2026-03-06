@@ -1,0 +1,84 @@
+[
+    {
+        "question": "How many passengers are there?",
+        "sql": "SELECT count(*) FROM \"postgres_air\".\"passenger\"",
+        "sample_results": [
+            {
+                "count": 21140719
+            }
+        ]
+    },
+    {
+        "question": "What is the name of the passenger with ID 123456?",
+        "sql": "SELECT first_name, last_name FROM \"postgres_air\".\"passenger\" WHERE passenger_id=123456",
+        "sample_results": [
+            {
+                "first_name": "EMILY",
+                "last_name": "HAMMOND"
+            }
+        ]
+    },
+    {
+        "question": "How many flights are scheduled in each airport?",
+        "sql": "SELECT departure_airport, count(*) FROM \"postgres_air\".\"flight\" GROUP BY departure_airport",
+        "sample_results": [
+            {
+                "departure_airport": "AAH",
+                "count": 156
+            },
+            {
+                "departure_airport": "ABJ",
+                "count": 416
+            },
+            {
+                "departure_airport": "ABV",
+                "count": 1144
+            },
+            {
+                "departure_airport": "ACC",
+                "count": 702
+            },
+            {
+                "departure_airport": "ACT",
+                "count": 156
+            }
+        ]
+    },
+    {
+        "question": "What is the total price of all bookings made by John Doe?",
+        "sql": "SELECT sum(price) FROM \"postgres_air\".\"booking\" WHERE account_id = (SELECT account_id FROM \"postgres_air\".\"account\" WHERE first_name='John' AND last_name='Doe')",
+        "sample_results": [
+            {
+                "sum": null
+            }
+        ]
+    },
+    {
+        "question": "What is the average flight time for flights leaving from New York?",
+        "sql": "SELECT avg(extract(epoch FROM (actual_arrival - actual_departure))) as avg_flight_time FROM \"postgres_air\".\"flight\" WHERE departure_airport='JFK'",
+        "sample_results": [
+            {
+                "avg_flight_time": 14640.370984042553
+            }
+        ]
+    },
+    {
+        "question": "What is the total number of accounts with a phone number that begins with '555'?",
+        "sql": "SELECT count(*) FROM \"postgres_air\".\"account\" WHERE account_id IN (SELECT account_id FROM \"postgres_air\".\"phone\" WHERE phone LIKE '555%')",
+        "sample_results": [
+            {
+                "count": 628
+            }
+        ]
+    },
+    {
+        "question": "What is the most common aircraft model used for flights?",
+        "sql": "SELECT a.model, count(*) as flight_count FROM \"postgres_air\".\"flight\" as f JOIN \"postgres_air\".\"aircraft\" as a ON f.aircraft_code = a.code GROUP BY a.model ORDER BY flight_count DESC LIMIT 1",
+        "sample_results": [
+            {
+                "model": "Airbus A320-200",
+                "flight_count": 99425
+            }
+        ]
+    }
+]
