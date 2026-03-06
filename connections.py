@@ -75,3 +75,40 @@ def get_columns_query(table_name):
     elif db_type == "sqlite":
          return f"PRAGMA table_info({table_name})"
     return ""
+
+def get_data_samples_query(table_name, limit=10):
+    """Generates a query to fetch sample data for a table."""
+    db_type = os.getenv("DB_TYPE", "postgres").lower()
+    schema = os.getenv("DB_SCHEMA", "public")
+    
+    if db_type == "postgres":
+        return f'SELECT * FROM "{schema}"."{table_name}" LIMIT {limit}'
+    elif db_type == "mysql":
+        return f'SELECT * FROM `{schema}`.`{table_name}` LIMIT {limit}'
+    else:
+        return f"SELECT * FROM {table_name} LIMIT {limit}"
+
+def get_relationships_query():
+    """Generates a query to fetch foreign key relationships (Postgres specific)."""
+    db_type = os.getenv("DB_TYPE", "postgres").lower()
+    schema = os.getenv("DB_SCHEMA", "public")
+    
+    if db_type == "postgres":
+        return f"""
+            SELECT
+                tc.table_name, 
+                kcu.column_name, 
+                ccu.table_name AS foreign_table_name,
+                ccu.column_name AS foreign_column_name 
+            FROM 
+                information_schema.table_constraints AS tc 
+                JOIN information_schema.key_column_usage AS kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                  AND tc.table_schema = kcu.table_schema
+                JOIN information_schema.constraint_column_usage AS ccu
+                  ON ccu.constraint_name = tc.constraint_name
+                  AND ccu.table_schema = tc.table_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema='{schema}';
+        """
+    # Placeholder for other DBs
+    return ""
