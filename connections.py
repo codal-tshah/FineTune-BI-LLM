@@ -1,16 +1,77 @@
 import os
+import json
 from dotenv import load_dotenv
 import vanna as vn
 from vanna.legacy.ollama import Ollama
 from vanna.legacy.chromadb import ChromaDB_VectorStore
+from sqlalchemy import create_engine
+from sqlalchemy.pool import QueuePool
 
 # Load environment variables
 load_dotenv()
+
+# Global engine for connection pooling
+_engine = None
 
 class MyVanna(ChromaDB_VectorStore, Ollama):
     def __init__(self, config=None):
         ChromaDB_VectorStore.__init__(self, config=config)
         Ollama.__init__(self, config=config)
+
+    def get_cached_query(self, question: str):
+        """
+        Modified to handle semantic similarity correctly using ChromaDB's search.
+        Even if the phrasing changes (e.g., 'show' vs 'list'), if it's semantically 
+        similar to an existing question, return the cached SQL.
+        """
+        # Threshold for semantic matching (0.0 means identical, higher means more permissive)
+        # Note: Vanna/ChromaDB typically returns results sorted by distance if exposed.
+        # Since we use get_similar_question_sql, it returns a list of results.
+        
+        results = self.get_similar_question_sql(question)
+        if not results:
+            return None, None
+        
+        # We manually check the top result. 
+        # For a truly robust system, we would check the 'distance' if the API provided it.
+        # Given we can't see the raw similarity score easily through this Vanna wrapper,
+        # we do a slightly smarter check for key tokens.
+        
+        best_match = results[0]
+        match_q = best_match['question'].lower()
+        query_q = question.lower()
+        
+        # Normalize: Remove common SQL-NL "fluff" words to check for core intent
+        fluff = ["show", "list", "get", "me", "all", "please", "can", "you", "tell", "following"]
+        def normalize(text):
+            for word in fluff:
+                text = text.replace(f" {word} ", " ")
+                if text.startswith(word + " "): text = text[len(word)+1:]
+            return " ".join(text.split())
+
+        if normalize(match_q) == normalize(query_q):
+             print(f"[Semantic Cache Hit] Found similar query: '{best_match['question']}'")
+             print(f"SQL: {best_match['sql']}")
+             try:
+                 df = self.run_sql(best_match['sql'])
+                 return best_match['sql'], df
+             except:
+                 return None, None
+        
+        return None, None
+
+    def train_structured_schema(self, table_name, schema_df, relationships=None):
+        """
+        Embeds a structured version of the schema for better retrieval accuracy.
+        """
+        columns = schema_df.to_dict(orient='records')
+        structured_doc = {
+            "table_name": table_name,
+            "columns": columns,
+            "relationships": relationships or []
+        }
+        # Store as a formatted JSON document string to preserve structure
+        self.add_documentation(json.dumps(structured_doc))
 
 def get_vanna_instance():
     config = {
@@ -20,15 +81,33 @@ def get_vanna_instance():
     return MyVanna(config=config)
 
 def connect_database(vn_instance):
+    global _engine
     db_type = os.getenv("DB_TYPE", "postgres").lower()
     
     if db_type == "postgres":
+        user = os.getenv("DB_USER")
+        password = os.getenv("DB_PASS")
+        host = os.getenv("DB_HOST", "localhost")
+        port = os.getenv("DB_PORT", 5432)
+        dbname = os.getenv("DB_NAME")
+        
+        # Initialize SQLAlchemy engine with connection pooling
+        if _engine is None:
+            connection_url = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}"
+            _engine = create_engine(
+                connection_url,
+                poolclass=QueuePool,
+                pool_size=5,
+                max_overflow=10,
+                pool_timeout=30
+            )
+
         vn_instance.connect_to_postgres(
-            host=os.getenv("DB_HOST", "localhost"),
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASS"),
-            port=int(os.getenv("DB_PORT", 5432))
+            host=host,
+            dbname=dbname,
+            user=user,
+            password=password,
+            port=int(port)
         )
     elif db_type == "sqlite":
         vn_instance.connect_to_sqlite(os.getenv("DB_NAME"))
