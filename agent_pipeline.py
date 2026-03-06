@@ -40,8 +40,12 @@ class AgenticSQLPipeline:
         Task: Return ONLY the domain name in uppercase (e.g., FLIGHT).
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
-        match = re.search(r'(FLIGHT|BOOKING|PASSENGER|AIRPORT|MISC)', response.upper())
-        return match.group(1) if match else "MISC"
+        # Filter out potential <|thought|> or other special tokens
+        clean_response = re.sub(r'<[^>]*>', '', response).strip().upper()
+        match = re.search(r'(FLIGHT|BOOKING|PASSENGER|AIRPORT|MISC)', clean_response)
+        category = match.group(1) if match else "MISC"
+        print(f"[Classifier Agent] Result: {category}")
+        return category
 
     def planner_agent(self, question, category="MISC"):
         print(f"[Planner Agent] Analyzing {category} question...")
@@ -120,11 +124,20 @@ class AgenticSQLPipeline:
         ONLY return the SQL code inside a code block.
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
-        sql_match = re.search(r'```sql\n(.*?)\n```', response, re.DOTALL)
-        if not sql_match:
-             sql_match = re.search(r'```(.*?)```', response, re.DOTALL)
         
-        return sql_match.group(1) if sql_match else response.strip()
+        # Clean response from thinking tokens or LLM preambles
+        clean_response = re.sub(r'<[^>]*>', '', response).strip()
+        
+        sql_match = re.search(r'```sql\n(.*?)\n```', clean_response, re.DOTALL)
+        if not sql_match:
+             sql_match = re.search(r'```(.*?)```', clean_response, re.DOTALL)
+        
+        final_sql = sql_match.group(1) if sql_match else clean_response.strip()
+        # Final cleanup of any trailing garbage outside the last SQL block if the match failed
+        if "```" in final_sql:
+            final_sql = final_sql.split("```")[0].strip()
+            
+        return final_sql
 
     def validator_agent(self, question, sql):
         """

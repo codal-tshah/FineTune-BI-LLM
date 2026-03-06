@@ -18,10 +18,22 @@ class EnhancedJSONEncoder(json.JSONEncoder):
             return obj.isoformat()
         return super(EnhancedJSONEncoder, self).default(obj)
 
-def generate_synthetic_data(num_examples=10):
+def generate_synthetic_data(num_examples=20):
     vn = get_vanna_instance()
     connect_database(vn)
     
+    # 0. Load Existing Questions to prevent duplicates
+    existing_questions = set()
+    existing_data = []
+    if os.path.exists('generated_training_data.json'):
+        try:
+            with open('generated_training_data.json', 'r') as f:
+                existing_data = json.load(f)
+                existing_questions = {item['question'].lower().strip() for item in existing_data}
+        except Exception as e:
+            print(f"Warning: Could not read existing training data: {e}")
+            existing_data = []
+
     # 1. Extract Schema Info for the Prompt
     schema_query = get_schema_query()
     tables_df = vn.run_sql(schema_query)
@@ -42,20 +54,21 @@ def generate_synthetic_data(num_examples=10):
         ])
 
     context_str = "\n".join(schema_context) + relationships
-    
     schema = os.getenv("DB_SCHEMA", "public")
     
     print(f"Starting synthetic data generation for {num_examples} examples...")
     
-    generated_data = []
-    success_count = 0
+    # Send existing questions to LLM to prevent overlap in the generation phase
+    exclude_list = list(existing_questions)[:20]
     
     prompt = f"""
     You are a database expert for a Business Intelligence tool.
     Based on the following database schema, generate {num_examples} diverse natural language questions and their corresponding SQL queries.
     
-    IMPORTANT: You MUST use schema-qualified table names in the SQL.
-    Every table reference should be in the format: "{schema}"."table_name"
+    IMPORTANT: DO NOT generate questions similar to these existing ones: {exclude_list}
+    
+    CRITICAL: You MUST use schema-qualified table names in the SQL.
+    Every table reference should be in the format: \"{schema}\".\"table_name\"
     
     Schema:
     {context_str}
@@ -66,10 +79,14 @@ def generate_synthetic_data(num_examples=10):
     3. Ensure the SQL is valid for {os.getenv('DB_TYPE', 'postgres')}.
     4. Provide the output in a clean JSON format: 
        [
-         {{"question": "How many passengers are there?", "sql": "SELECT count(*) FROM {schema}.passenger"}}
+         {{"question": "How many passengers are there?", "sql": "SELECT count(*) FROM \"{schema}\".\"passenger\""}}
        ]
     5. No text before or after the JSON. Just the array.
     """
+
+    generated_data = []
+    success_count = 0
+    pairs = []
 
     # 2. Call LLM to generate pairs
     try:
@@ -79,7 +96,6 @@ def generate_synthetic_data(num_examples=10):
         ]
         raw_response = vn.submit_prompt(messages)
     
-        # Clean up the response
         cleaned_response = raw_response.strip()
         if "```json" in cleaned_response:
             cleaned_response = cleaned_response.split("```json")[-1].split("```")[0].strip()
@@ -90,11 +106,9 @@ def generate_synthetic_data(num_examples=10):
         if start_idx != -1:
             cleaned_response = cleaned_response[start_idx:]
             
-        # Try to parse or fix partial JSON
         try:
             pairs = json.loads(cleaned_response)
         except json.JSONDecodeError:
-            # Attempt to close brackets if truncated
             last_brace = cleaned_response.rfind("}")
             if last_brace != -1:
                 try:
@@ -111,10 +125,15 @@ def generate_synthetic_data(num_examples=10):
 
     # 3. Validate and Train
     for item in pairs:
-        question = item.get('question')
+        question = item.get('question', '').strip()
         sql = item.get('sql')
         
         if not question or not sql:
+            continue
+
+        # --- DUPLICATE CHECK ---
+        if question.lower() in existing_questions:
+            print(f"Skipping: '{question}' already exists in training data.")
             continue
             
         # Safeguards
@@ -126,18 +145,15 @@ def generate_synthetic_data(num_examples=10):
         print(f"Testing: {question}")
         
         try:
-            # 4. Execute to check validity and data
             results = vn.run_sql(sql)
-            
             if results is None or results.empty:
                 print(f"Skipping: Query returned no data.")
                 continue
                 
-            # 5. Store in Vanna
             vn.train(question=question, sql=sql)
             success_count += 1
+            existing_questions.add(question.lower())
             
-            # 6. Log for manual review
             generated_data.append({
                 "question": question,
                 "sql": sql,
@@ -149,13 +165,15 @@ def generate_synthetic_data(num_examples=10):
             print(f"SQL Validation Error for '{question}': {str(e)}")
             continue
 
-    # 7. Save to JSON file
+    # 4. Save and Update
+    final_data = existing_data + generated_data
     with open('generated_training_data.json', 'w') as f:
-        json.dump(generated_data, f, indent=4, cls=EnhancedJSONEncoder)
+        json.dump(final_data, f, indent=4, cls=EnhancedJSONEncoder)
         
     print(f"\nGeneration complete!")
-    print(f"Total trained: {success_count}")
-    print(f"Review data saved to 'generated_training_data.json'")
+    print(f"Total NEWLY trained this run: {success_count}")
+    print(f"Total historical training records: {len(final_data)}")
+    print(f"Review data updated in 'generated_training_data.json'")
 
 if __name__ == "__main__":
-    generate_synthetic_data(num_examples=10)
+    generate_synthetic_data(num_examples=20)
