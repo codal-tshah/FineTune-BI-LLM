@@ -75,5 +75,9 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 3. **Inference**: DeepSeek uses this "context" to write a precise SQL query for your specific database.
 
 ### Does it "Train" DeepSeek?
-- **No**, the model weights of `deepseek-coder` are not modified.
-- **Yes**, the model "understands" your database because we give it the exact "cheat sheet" (schema + examples) it needs via the RAG pipeline.
+* **No**, the model weights of `deepseek-coder` are not modified.
+* **Yes**, the model "understands" your database because we give it the exact "cheat sheet" (schema + examples) it needs via the RAG pipeline.
+
+## 11. Workflow Visibility & Prompt Noise Control
+- `agent_pipeline.py` now logs each phase via `log_stage(...)`, emitting a `[Workflow] Phase X - Y` line that summarizes what just finished (e.g., cache hit, category determined, SQL executed, training recorded).
+- `connections.py`’s `MyVanna.log` overrides the base logger to suppress Ollama prompt dumps unless the `VANNA_SHOW_PROMPTS=1` environment variable is set, keeping the CLI clean while still offering diagnostics when needed.
