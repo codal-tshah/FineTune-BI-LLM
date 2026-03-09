@@ -109,6 +109,11 @@ class AgenticSQLPipeline:
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         return response
+ 
+    def log_stage(self, stage, status, detail=None):
+        """Structured workflow logging for CLI visibility."""
+        detail_str = f" ({detail})" if detail else ""
+        print(f"[Workflow] {stage}: {status}{detail_str}")
 
     def sql_agent(self, question, plan):
         """
@@ -125,19 +130,27 @@ class AgenticSQLPipeline:
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         
-        # Clean response from thinking tokens or LLM preambles
-        clean_response = re.sub(r'<[^>]*>', '', response).strip()
+        # --- ROBUST CLEANING FOR DEEPSEEK GARBAGE ---
+        # 1. Remove common LLM special tokens that cause syntax errors
+        # (e.g., <|begin_of_sentence|>, <|thought|>, etc.)
+        clean_response = re.sub(r'<[^>]*>', '', response)
         
+        # 2. Extract the actual SQL from the code block
         sql_match = re.search(r'```sql\n(.*?)\n```', clean_response, re.DOTALL)
         if not sql_match:
              sql_match = re.search(r'```(.*?)```', clean_response, re.DOTALL)
         
         final_sql = sql_match.group(1) if sql_match else clean_response.strip()
-        # Final cleanup of any trailing garbage outside the last SQL block if the match failed
+        
+        # 3. Last-resort cleanup: Delete all text before "SELECT" and after the last semicolon
+        if "SELECT" in final_sql.upper():
+            start_pos = final_sql.upper().find("SELECT")
+            final_sql = final_sql[start_pos:]
+            
         if "```" in final_sql:
             final_sql = final_sql.split("```")[0].strip()
-            
-        return final_sql
+
+        return final_sql.strip()
 
     def validator_agent(self, question, sql):
         """
@@ -150,6 +163,7 @@ class AgenticSQLPipeline:
         if any(cmd in sql.lower() for cmd in forbidden):
             return None, "Blocked: Forbidden SQL command detected."
 
+        trained = False
         try:
             # 2. Execution Check
             results = self.vn.run_sql(sql)
@@ -158,39 +172,47 @@ class AgenticSQLPipeline:
             if results is not None and not results.empty:
                 print("[Self-Learning] Query successful. Auto-training Vanna store...")
                 self.vn.train(question=question, sql=sql)
+                trained = True
             
-            return results, None
+            return results, None, trained
         except Exception as e:
             # If it fails, we could potentially prompt the SQL agent to fix it (Self-Correction)
-            return None, f"SQL Error: {str(e)}"
+            return None, f"SQL Error: {str(e)}", False
 
     def run(self, question):
         """
         Runs the full 4-Agent pipeline (Classifier -> Planner -> SQL -> Validator) with integrated caching.
         """
         # --- PHASE 0: Check Caching (via ChromaDB) ---
-        print("[Cache Check] Searching for existing solutions...")
+        self.log_stage("Phase 0 - Cache", "Searching for a cached solution")
         cached_sql, cached_results = self.vn.get_cached_query(question)
         if cached_results is not None:
-             print("[Fast Path] Returning cached results.")
-             return cached_results
+            self.log_stage("Phase 0 - Cache", "Cache hit", "Returning cached results without re-running agents")
+            return cached_results
 
         # --- PHASE 1: Classification ---
         category = self.classifier_agent(question)
+        self.log_stage("Phase 1 - Classification", "Completed", f"Category={category}")
 
         # --- PHASE 2: Planning ---
         plan = self.planner_agent(question, category)
+        self.log_stage("Phase 2 - Planning", "Plan drafted", "Plan text stored for SQL agent")
         
         # --- PHASE 3: SQL Generation ---
         sql = self.sql_agent(question, plan)
+        self.log_stage("Phase 3 - SQL Generation", "SQL created", f"{sql.splitlines()[0] if sql else 'no SQL'}...")
         
         # --- PHASE 4: Validation ---
-        results, error = self.validator_agent(question, sql)
-        
+        results, error, trained = self.validator_agent(question, sql)
+        if trained:
+            self.log_stage("Phase 4 - Validation", "Self-learning triggered", "Stored new QA pair in Vanna cache")
+
         if error:
-            print(f"Pipeline Failed: {error}")
+            self.log_stage("Phase 4 - Validation", "Failed", error)
             return None
-        
+
+        self.log_stage("Phase 4 - Validation", "Success", "SQL executed and results returned")
+
         print(f"\nFinal SQL: {sql} \n")
         print(f"Query executed successfully. Returning results...")
         return results

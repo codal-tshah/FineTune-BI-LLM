@@ -17,6 +17,29 @@ class MyVanna(ChromaDB_VectorStore, Ollama):
     def __init__(self, config=None):
         ChromaDB_VectorStore.__init__(self, config=config)
         Ollama.__init__(self, config=config)
+        show_prompts = os.getenv("VANNA_SHOW_PROMPTS", "false").lower() in ("1", "true", "yes")
+        self._suppress_vanna_prompts = not show_prompts
+        self._prompt_log_notice_printed = False
+
+    def log(self, message: str, title: str = "Info"):
+        """Suppress verbose Ollama logging unless the CLI opt-in flag is set."""
+
+        if self._suppress_vanna_prompts and isinstance(message, str):
+            suppressed_prefixes = (
+                "Ollama parameters:",
+                "Prompt Content:",
+                "Ollama Response:",
+            )
+            if message.startswith(suppressed_prefixes):
+                if not self._prompt_log_notice_printed:
+                    super().log(
+                        "Vanna prompt logging suppressed (set VANNA_SHOW_PROMPTS=1 to reveal)",
+                        title=title,
+                    )
+                    self._prompt_log_notice_printed = True
+                return
+
+        super().log(message, title)
 
     def get_cached_query(self, question: str):
         """
