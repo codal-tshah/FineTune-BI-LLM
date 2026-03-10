@@ -237,6 +237,13 @@ class AgenticSQLPipeline:
                 print("[SQL Agent] Warning: LLM returned multiple queries. Extracting the first one...")
                 final_sql = parts[0] + ";"
 
+        # 5. Auto-LIMIT: Prevent massive result sets (safety guard)
+        if final_sql and 'LIMIT' not in final_sql.upper():
+            # Strip trailing semicolon, add LIMIT, then re-add semicolon
+            final_sql = final_sql.rstrip().rstrip(';')
+            final_sql += "\nLIMIT 10;"
+            print("[SQL Agent] Auto-added LIMIT 10 (no LIMIT clause found)")
+
         return final_sql.strip()
 
     def _load_schema_tables(self):
