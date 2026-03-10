@@ -35,17 +35,15 @@
   4. **Validator Agent**: Runs the SQL, checks for errors, and triggers **Self-Learning** on success.
 
 ## 8. Semantic Query Caching (Fast Path)
-- **Problem**: Re-running the 4-agent pipeline for similar or slightly rephrased questions (e.g., "List..." vs "Show...") is slow (~15s).
-- **Solution**: Implemented **Semantic Normalization Caching** in `connections.py`.
-- **Logic**:
   - Uses ChromaDB to find similar previously answered questions.
   - Applies a **Normalization Layer** to strip "fluff" words (show, list, please, me, all).
   - If the core intent matches an existing record, it returns the cached SQL/Results instantly (<1s).
 
 ## 9. Performance & Reliability Enhancements
-- **Connection Pooling**: Switched to SQLAlchemy `QueuePool` for high-performance PostgreSQL connection management.
-- **Strict Schema Injection**: The Planner now pulls live data from `information_schema` to ensure the LLM only uses existing columns.
-- **Self-Correction**: Successful queries are automatically fed back into the Vanna training store by the Validator agent.
+
+## 10. Failure Observability & Schema Guardrails
+- **Failure Log**: `MyVanna.log_failure(...)` now writes every caught SQL exception as a `failure_log` document number in ChromaDB (question + SQL + error + timestamp). That lets you query the vector store for past mistakes instead of losing the failed text.
+- **Schema Qualification Guardrail**: `AgenticSQLPipeline._ensure_schema_qualified` post-processes generated SQL by replacing plain table references with `"schema"."table"` equivalents before execution, which prevents errors like `relation "flight" does not exist` when the planner returns unqualified names.
 
 ## Updated Component Matrix
 

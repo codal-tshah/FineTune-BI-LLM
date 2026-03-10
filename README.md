@@ -12,6 +12,8 @@ A production-ready Business Intelligence toolkit that turns natural language int
 - **Local-first stack**: (no external APIs): Ollama LLM + ChromaDB vector store + Postgres.
 - **Workflow logging**: Each agent phase now emits a concise `[Workflow]` line so you can trace which agent ran without dumping raw prompts.
 - **Prompt noise control**: Ollama prompt dumps are suppressed by default and can be re-enabled via `VANNA_SHOW_PROMPTS=1` when debugging.
+- **Failure observability**: Every SQL that errors is captured as a `failure_log` document in ChromaDB so you can revisit the exact question + SQL + error later.
+- **Schema qualification guardrail**: Generated SQL is post-processed to replace plain table names with schema-qualified references before execution, avoiding `relation "flight" does not exist` problems.
 
 ## 🧠 Architecture Overview
 
