@@ -52,18 +52,22 @@ graph TD
 ## 🚀 Getting Started
 
 ### 1. Prerequisites
+
 ```bash
 ollama serve &
 ollama pull deepseek-coder:6.7b
 ```
+
 Ensure PostgreSQL (Postgres Air sample DB) is running locally.
 
 ### 2. Install dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 3. Configure `.env`
+
 ```env
 DB_TYPE=postgres
 DB_HOST=localhost
@@ -77,28 +81,35 @@ VEC_STORAGE_PATH=./vanna_storage
 ```
 
 ### 4. Train (first time)
+
 ```bash
 python train.py
 ```
+
 - Reads schemas + relationships.
 - Samples data for context.
 - Embeds everything into ChromaDB.
 
 ### 5. (Optional) Boost with synthetic data
+
 ```bash
 python synthetic_training_generator.py
 ```
+
 Generates additional validated NL/SQL pairs to improve the planner.
 
 ### 6. Run the app
+
 ```bash
 python app.py
 ```
+
 You will be prompted to enter natural language questions.
 
 ## 🗣️ Asking NLP Questions
 
 Use `app.ask_question()` directly:
+
 ```python
 from app import ask_question
 result = ask_question("Show me the top 5 airports by name in the US")
@@ -106,9 +117,10 @@ print(result)
 ```
 
 Or run `python app.py` for an interactive CLI:
+
+```💬 Ask your question: <type here>
 ```
-💬 Ask your question: <type here>
-```
+
 Type `exit` or `quit` to stop.
 
 - `-q / --question`: Run a single question without the interactive loop.
@@ -132,6 +144,7 @@ Type `exit` or `quit` to stop.
 ## 🛠️ Next Steps & Roadmap
 
 **Short-term**
+
 - [x] Planner/SQL/Validator pipeline running ✅
 - [x] Schema-introspection + strict schema reference ✅
 - [x] Self-learning loop implemented ✅
@@ -139,11 +152,13 @@ Type `exit` or `quit` to stop.
 - [ ] Track query latency + register metrics
 
 **Mid-term**
+
 - Add Flask/FastAPI + React UI for business users
 - Cache repeated questions to reduce LLM calls
 - Add MySQL/SQLite connectors inside `connections.py`
 
 **Long-term**
+
 - Fine-tune DeepSeek with domain-specific SQL patterns
 - Build query analytics dashboard
 - Support multi-database federation
@@ -158,6 +173,7 @@ Use the interactive CLI (`python app.py`) or call `ask_question()` directly with
 Not always. It’s great for the initial bootstrap or when the planner struggles with new tables/patterns. After a few successful queries, the self-learning loop keeps improving accuracy.
 
 **What’s the next step?**
+
 - Validate results on real BI questions.
 - Prototype a web or API front end calling `ask_question()`.
 - Monitor success rate and refine planner prompts.
