@@ -18,7 +18,7 @@ class EnhancedJSONEncoder(json.JSONEncoder):
             return obj.isoformat()
         return super(EnhancedJSONEncoder, self).default(obj)
 
-def generate_synthetic_data(num_examples=20):
+def generate_synthetic_data(num_examples=100):
     vn = get_vanna_instance()
     connect_database(vn)
     
@@ -73,15 +73,16 @@ def generate_synthetic_data(num_examples=20):
     Schema:
     {context_str}
     
-    Guidelines:
-    1. Questions should range from simple (count, filter) to complex (joins, aggregations, subqueries).
-    2. Use ONLY the tables and columns provided as shown in the schema.
-    3. Ensure the SQL is valid for {os.getenv('DB_TYPE', 'postgres')}.
-    4. Provide the output in a clean JSON format: 
-       [
-         {{"question": "How many passengers are there?", "sql": "SELECT count(*) FROM \"{schema}\".\"passenger\""}}
-       ]
-    5. No text before or after the JSON. Just the array.
+        Guidelines:
+        1. Questions should range from simple (count, filter) to complex (joins, aggregations, DISTINCT, GROUP BY, window functions, subqueries).
+        2. Use ONLY the tables and columns provided as shown in the schema.
+        3. When multiple tables share column names, always qualify the column with a table alias (e.g., `a.account_id` vs `account_id`).
+        4. Ensure the SQL is valid for {os.getenv('DB_TYPE', 'postgres')}.
+        5. Provide the output in a clean JSON format: 
+             [
+                 {{"question": "How many passengers are there?", "sql": "SELECT count(*) FROM \"{schema}\".\"passenger\""}}
+             ]
+        6. No text before or after the JSON. Just the array.
     """
 
     generated_data = []
@@ -176,4 +177,4 @@ def generate_synthetic_data(num_examples=20):
     print(f"Review data updated in 'generated_training_data.json'")
 
 if __name__ == "__main__":
-    generate_synthetic_data(num_examples=20)
+    generate_synthetic_data(num_examples=100)
