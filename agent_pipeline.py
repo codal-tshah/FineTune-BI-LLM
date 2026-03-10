@@ -38,13 +38,13 @@ class AgenticSQLPipeline:
         Question: {question}
         
         Available Domains:
-        - FLIGHT: Queries about flights, status, schedules, aircraft codes.
-        - BOOKING: Queries about bookings, prices, tickets, boarding passes, booking legs.
-        - PASSENGER: Queries about passengers, accounts, frequent flyer levels, phone numbers.
-        - AIRPORT: Queries about airport names, locations, timezones, countries.
-        - MISC: General metadata or unknown.
+        - FLIGHT: Queries about flight status, schedules, aircraft codes, or departures/arrivals.
+        - BOOKING: Queries about bookings, prices, tickets, boarding passes, booking legs, or seat assignments.
+        - PASSENGER: Queries about passengers, accounts, frequent flyer levels, phone numbers, or person details.
+        - AIRPORT: Queries about airport names, locations, timezones, countries, or geographic codes.
+        - MISC: General metadata, unknown, or systemic queries.
 
-        Task: Return ONLY the domain name in uppercase (e.g., FLIGHT).
+        Task: Return ONLY the domain name in uppercase (e.g., BOOKING). If you are unsure, return MISC.
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         # Filter out potential <|thought|> or other special tokens
@@ -86,13 +86,33 @@ class AgenticSQLPipeline:
         all_tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema = '" + os.getenv('DB_SCHEMA', 'public') + "'"
         all_tables = pd.read_sql(all_tables_query, connections._engine)['table_name'].tolist()
         
-        # Narrow down tables based on category to save LLM context space
-        target_tables = domain_tables.get(category, [])
+        # Hybrid table selection to prevent category-induced blindness
+        target_tables = set(domain_tables.get(category, []))
+        
+        # 1. Add tables mentioned in training examples (context-aware)
+        if training_data:
+            for example in training_data:
+                # Extract words that look like table names from the SQL in training data
+                sql_words = re.findall(r'[\w\"]+', example.get('sql', ''))
+                for word in sql_words:
+                    word_clean = word.strip('"').lower()
+                    if word_clean in all_tables:
+                        target_tables.add(word_clean)
+        
+        # 2. Keyword-based table selection (failsafe)
+        question_words = set(re.findall(r'\w+', question.lower()))
+        for t in all_tables:
+            # Check for exact name match or common variations (underscore removal)
+            t_clean = t.replace('_', ' ')
+            if t in question_words or any(word in question.lower() for word in t_clean.split()):
+                target_tables.add(t)
+        
+        # Fallback to all if still empty
         if not target_tables:
-            target_tables = all_tables
+            target_tables = set(all_tables)
         
         table_context_str = ""
-        for t in target_tables:
+        for t in sorted(list(target_tables)):
             if t in all_tables:
                 cols = self.get_table_columns(t)
                 if cols:
@@ -111,7 +131,8 @@ class AgenticSQLPipeline:
         Category: {category}
         Question: {question}
         Strict Relationship Reference (USE THESE FOR JOINS - DO NOT INVENT IDS):{rel_text}
-        Available Context: {training_data}
+        
+        Potential Context (USE SELECTIVELY): {training_data}
         Strict Schema Reference:{table_context_str}
         
         Task: Create a step-by-step plan to solve this using SQL. 
@@ -119,17 +140,18 @@ class AgenticSQLPipeline:
         1. ONLY use tables and columns exactly as named in the 'Strict Schema Reference' above.
         2. DO NOT JOIN tables unless you need columns that are not available in the primary table. Check the 'Sample Data' to see if columns are likely to be populated.
         3. DATA WARNING: In the 'passenger' table, 'account_id' is often empty/NULL. Do NOT join 'passenger' and 'account' unless the question explicitly asks for account details (like login/email). If the question is just about passenger attributes (like age), use 'passenger' table ALONE.
-        4. Identifiers guide:
+        4. CONTEXT PRUNING: Only use retrieved 'Potential Context' if it is DIRECTLY RELEVANT to the current question. If the context contains filters (like age, date) that are NOT mentioned in the question, DISCARD THOSE FILTERS.
+        5. Identifiers guide:
            - To find a person by email, check 'booking.email' or 'account.login'.
            - To get boarding pass details, use 'boarding_pass' and join with 'passenger'.
-        5. Focus on correctness: If a column doesn't exist, use the most plausible path using provided IDs.
+        6. Focus on correctness: If a column doesn't exist, use the most plausible path using provided IDs.
         
         Plan format: 
         TABLES: [table1, table2]
         JOIN_LOGIC: [table1.col = table2.col or 'None']
         STEPS: [1. Filter by X, 2. Join Y, 3. Aggregate Z]
         
-        6. Always qualify columns with table aliases when multiple tables share the same column name.
+        7. Always qualify columns with table aliases when multiple tables share the same column name.
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         return response
@@ -164,8 +186,12 @@ class AgenticSQLPipeline:
         
         Task: Write a single, valid standard SQL query to answer the question using the provided plan. 
         Use the schema-qualified format: "{os.getenv('DB_SCHEMA', 'public')}"."table_name"
-        CRITICAL: ONLY return the SQL code. DO NOT provide multiple options. DO NOT add commentary. DO NOT return more than one SELECT statement.
-        ONLY return the SQL code inside a single code block.
+        CRITICAL: 
+        - ONLY return the SQL code inside a single code block. 
+        - DO NOT provide multiple options. 
+        - DO NOT add commentary. 
+        - DO NOT return more than one SELECT statement.
+        - DO NOT use parameterized queries (e.g., :age, :name, $1). Use literal values or remove the filter if the value is unknown.
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         
@@ -181,13 +207,21 @@ class AgenticSQLPipeline:
         
         final_sql = sql_match.group(1) if sql_match else clean_response.strip()
         
-        # 3. Last-resort cleanup: Delete all text before "SELECT" and after the last semicolon
+        # 3. Last-resort cleanup: Delete all text before "SELECT" and after the first semicolon
         if "SELECT" in final_sql.upper():
             start_pos = final_sql.upper().find("SELECT")
             final_sql = final_sql[start_pos:]
             
         if "```" in final_sql:
             final_sql = final_sql.split("```")[0].strip()
+
+        # 4. Multi-query guardrail: If there are multiple queries, take only the first one
+        if ";" in final_sql:
+            # Check if there's significant content after the first semicolon
+            parts = final_sql.split(";")
+            if len(parts) > 1 and "SELECT" in parts[1].upper():
+                print("[SQL Agent] Warning: LLM returned multiple queries. Extracting the first one...")
+                final_sql = parts[0] + ";"
 
         return final_sql.strip()
 
