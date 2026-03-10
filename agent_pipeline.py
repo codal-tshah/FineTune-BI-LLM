@@ -2,6 +2,7 @@ import os
 import json
 import re
 import time
+import difflib
 import pandas as pd
 import connections
 from connections import (
@@ -16,6 +17,7 @@ class AgenticSQLPipeline:
         self.vn = get_vanna_instance()
         connect_database(self.vn)
         self.schema_tables = self._load_schema_tables()
+        self.schema_map = self._build_schema_map()
     
     def get_table_columns(self, table_name):
         """Fetch actual column metadata from database to prevent hallucination."""
@@ -24,7 +26,8 @@ class AgenticSQLPipeline:
                 return []
             query = get_columns_query(table_name)
             result = pd.read_sql(query, connections._engine)
-            return result.to_dict('records')
+            # Return a simple list of column names for prompt clarity
+            return result['column_name'].tolist()
         except Exception as e:
             print(f"Warning: Could not fetch columns for {table_name}: {e}")
             return []
@@ -127,31 +130,43 @@ class AgenticSQLPipeline:
                     
                     table_context_str += f"\nTable: {t}\nColumns: {cols}\nSample Data: {sample_data}\n"
 
+        # 3. Sanitize training context to prevent internal ID leakage
+        clean_context = "No relevant examples found."
+        if training_data:
+            context_parts = []
+            for item in training_data:
+                q = item.get('question', 'N/A')
+                s = item.get('sql', 'N/A')
+                context_parts.append(f"Question: {q}\nSQL: {s}")
+            clean_context = "\n---\n".join(context_parts)
+
         prompt = f"""
         Category: {category}
         Question: {question}
         Strict Relationship Reference (USE THESE FOR JOINS - DO NOT INVENT IDS):{rel_text}
         
-        Potential Context (USE SELECTIVELY): {training_data}
+        Potential Context (USE SELECTIVELY - DO NOT COPY VALUES OR IDS): {clean_context}
         Strict Schema Reference:{table_context_str}
         
         Task: Create a step-by-step plan to solve this using SQL. 
         CRITICAL RULES:
         1. ONLY use tables and columns exactly as named in the 'Strict Schema Reference' above.
-        2. DO NOT JOIN tables unless you need columns that are not available in the primary table. Check the 'Sample Data' to see if columns are likely to be populated.
+        2. NO HALLUCINATION: DO NOT assume a table has a generic 'id' or 'uid' column. Look at the column names provided. If it has 'passenger_id', use that.
+        3. DO NOT JOIN tables unless you need columns that are not available in the primary table. Check the 'Sample Data' to see if columns are likely to be populated.
         3. DATA WARNING: In the 'passenger' table, 'account_id' is often empty/NULL. Do NOT join 'passenger' and 'account' unless the question explicitly asks for account details (like login/email). If the question is just about passenger attributes (like age), use 'passenger' table ALONE.
         4. CONTEXT PRUNING: Only use retrieved 'Potential Context' if it is DIRECTLY RELEVANT to the current question. If the context contains filters (like age, date) that are NOT mentioned in the question, DISCARD THOSE FILTERS.
-        5. Identifiers guide:
+        5. JOIN ENFORCEMENT: Every table mentioned in TABLES must have a corresponding entry in JOIN_LOGIC (unless only one table is used). Ensure you have a clear path (e.g., A -> B -> C).
+        6. Identifiers guide:
            - To find a person by email, check 'booking.email' or 'account.login'.
            - To get boarding pass details, use 'boarding_pass' and join with 'passenger'.
-        6. Focus on correctness: If a column doesn't exist, use the most plausible path using provided IDs.
+        7. Focus on correctness: If a column doesn't exist, use the most plausible path using provided IDs.
         
         Plan format: 
         TABLES: [table1, table2]
         JOIN_LOGIC: [table1.col = table2.col or 'None']
         STEPS: [1. Filter by X, 2. Join Y, 3. Aggregate Z]
         
-        7. Always qualify columns with table aliases when multiple tables share the same column name.
+        8. Always qualify columns with table aliases when multiple tables share the same column name.
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         return response
@@ -179,14 +194,23 @@ class AgenticSQLPipeline:
             Please analyze the error and Provide a FIXED SQL query.
             """
 
+        # Build a compact schema reference for the SQL Agent
+        schema_ref = ""
+        for table, cols in self.schema_map.items():
+            schema_ref += f"\n  {table}: [{', '.join(cols)}]"
+
         prompt = f"""
         Original Question: {question}
         Plan: {plan}
         {correction_prompt}
         
+        EXACT DATABASE SCHEMA (use ONLY these table and column names):{schema_ref}
+
         Task: Write a single, valid standard SQL query to answer the question using the provided plan. 
         Use the schema-qualified format: "{os.getenv('DB_SCHEMA', 'public')}"."table_name"
         CRITICAL: 
+        - ONLY use column names from the EXACT DATABASE SCHEMA above. Cross-check every column.
+        - DO NOT guess or hallucinate generic 'id' columns. If the table has 'passenger_id', use that.
         - ONLY return the SQL code inside a single code block. 
         - DO NOT provide multiple options. 
         - DO NOT add commentary. 
@@ -197,10 +221,15 @@ class AgenticSQLPipeline:
         
         # --- ROBUST CLEANING FOR DEEPSEEK GARBAGE ---
         # 1. Remove common LLM special tokens that cause syntax errors
-        # (e.g., <|begin_of_sentence|>, <|thought|>, etc.)
         clean_response = re.sub(r'<[^>]*>', '', response)
         
-        # 2. Extract the actual SQL from the code block
+        # 2. STRIP UUIDs and internal malformed markers (Critical Fix)
+        # Matches patterns like 30007612-d5b6... or :30007612...
+        clean_response = re.sub(r':?[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}', '', clean_response)
+        # Strip colon-prefixed hex strings that often appear as hallucinated parameters
+        clean_response = re.sub(r':[a-fA-F0-9]{8,}', '', clean_response)
+        
+        # 3. Extract the actual SQL from the code block
         sql_match = re.search(r'```sql\n(.*?)\n```', clean_response, re.DOTALL)
         if not sql_match:
              sql_match = re.search(r'```(.*?)```', clean_response, re.DOTALL)
@@ -259,6 +288,111 @@ class AgenticSQLPipeline:
             )
 
         return qualified_sql
+
+    def _build_schema_map(self):
+        """Pre-load {table_name: [column_names]} for fast SQL validation."""
+        schema_map = {}
+        for table in self.schema_tables:
+            cols = self.get_table_columns(table)
+            if cols:
+                schema_map[table] = cols
+        print(f"[Schema Map] Loaded {len(schema_map)} tables for SQL pre-validation.")
+        return schema_map
+
+    def _validate_sql(self, sql):
+        """
+        Code-level SQL pre-validator. Catches and fixes common LLM errors:
+        1. Fuzzy-match misspelled/truncated table names
+        2. Validate column references against actual schema
+        """
+        if not self.schema_map or not sql:
+            return sql
+
+        schema = os.getenv("DB_SCHEMA", "public")
+        valid_tables = list(self.schema_map.keys())
+        fixed_sql = sql
+
+        # --- Step 1: Fix misspelled/truncated table names ---
+        # Find all table-like references: schema.table or standalone table names
+        table_refs = re.findall(
+            rf'(?:"{schema}"\."|{schema}\.)([a-zA-Z_][a-zA-Z0-9_]*)',
+            fixed_sql
+        )
+        # Also find standalone table-like words after FROM/JOIN
+        standalone_refs = re.findall(
+            r'(?:FROM|JOIN)\s+(?:"?[a-zA-Z_]+"?\.)?"?([a-zA-Z_][a-zA-Z0-9_]*)"?',
+            fixed_sql,
+            re.IGNORECASE
+        )
+        all_table_refs = set(table_refs + standalone_refs)
+
+        for ref in all_table_refs:
+            ref_clean = ref.strip('"').lower()
+            if ref_clean in valid_tables or ref_clean == schema:
+                continue  # Already valid
+
+            # Fuzzy match against actual tables
+            matches = difflib.get_close_matches(ref_clean, valid_tables, n=1, cutoff=0.5)
+            if matches:
+                correct_table = matches[0]
+                print(f"[SQL Pre-Validator] Fixing table: '{ref}' → '{correct_table}'")
+                # Replace the misspelled table name (handle both quoted and unquoted)
+                fixed_sql = re.sub(
+                    rf'(?<![a-zA-Z_]){re.escape(ref)}(?![a-zA-Z_])',
+                    correct_table,
+                    fixed_sql
+                )
+
+        # --- Step 2: Validate column references (alias.column or table.column) ---
+        # Build alias map from the SQL: alias -> table_name
+        alias_map = {}
+        alias_pattern = re.findall(
+            r'(?:FROM|JOIN)\s+(?:"?[a-zA-Z_]+"?\.)?"?([a-zA-Z_][a-zA-Z0-9_]*)"?\s+(?:AS\s+)?([a-zA-Z_]\w*)',
+            fixed_sql,
+            re.IGNORECASE
+        )
+        for table_ref, alias in alias_pattern:
+            table_clean = table_ref.strip('"').lower()
+            alias_clean = alias.strip('"').lower()
+            # Skip SQL keywords that look like aliases
+            if alias_clean in ('on', 'where', 'group', 'order', 'limit', 'having', 'and', 'or', 'as', 'join', 'inner', 'left', 'right', 'full'):
+                continue
+            if table_clean in self.schema_map:
+                alias_map[alias_clean] = table_clean
+
+        # Find all alias.column or table.column references
+        col_refs = re.findall(r'([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)', fixed_sql)
+        for qualifier, column in col_refs:
+            q_lower = qualifier.strip('"').lower()
+            c_lower = column.strip('"').lower()
+
+            # Skip schema qualifiers (e.g., postgres_air.table)
+            if q_lower == schema:
+                continue
+
+            # Resolve alias to actual table name
+            actual_table = alias_map.get(q_lower, q_lower)
+
+            if actual_table not in self.schema_map:
+                continue  # Can't validate unknown tables
+
+            valid_columns = self.schema_map[actual_table]
+            valid_columns_lower = [c.lower() for c in valid_columns]
+
+            if c_lower not in valid_columns_lower:
+                # Try fuzzy match
+                matches = difflib.get_close_matches(c_lower, valid_columns_lower, n=1, cutoff=0.6)
+                if matches:
+                    correct_col = valid_columns[valid_columns_lower.index(matches[0])]
+                    print(f"[SQL Pre-Validator] Fixing column: '{qualifier}.{column}' → '{qualifier}.{correct_col}'")
+                    fixed_sql = fixed_sql.replace(
+                        f"{qualifier}.{column}",
+                        f"{qualifier}.{correct_col}"
+                    )
+                else:
+                    print(f"[SQL Pre-Validator] Warning: Column '{qualifier}.{column}' not found in '{actual_table}'. Valid: {valid_columns}")
+
+        return fixed_sql
 
     def validator_agent(self, question, sql):
         """
@@ -322,6 +456,8 @@ class AgenticSQLPipeline:
         p3_start = time.time()
         sql = self.sql_agent(question, plan)
         sql = self._ensure_schema_qualified(sql)
+        # Pre-validate SQL against actual schema (fuzzy fix tables/columns)
+        sql = self._validate_sql(sql)
         latencies["sql_generation"] = time.time() - p3_start
         self.log_stage("Phase 3 - SQL Generation", "SQL created", f"{sql.splitlines()[0] if sql else 'no SQL'}...")
         
@@ -337,6 +473,7 @@ class AgenticSQLPipeline:
             p3_retry_start = time.time()
             sql = self.sql_agent(question, plan, previous_sql=sql, error_message=error)
             sql = self._ensure_schema_qualified(sql)
+            sql = self._validate_sql(sql)
             latencies["sql_generation_retry"] = time.time() - p3_retry_start
             
             # Re-run Phase 4
