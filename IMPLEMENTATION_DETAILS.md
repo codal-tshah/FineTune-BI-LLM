@@ -31,19 +31,35 @@
 - **Agents**:
   1. **Classifier Agent**: Categorizes queries into domains (FLIGHT, BOOKING, PASSENGER, etc.).
   2. **Planner Agent**: Performs strict schema introspection of the categorized domain and generates a step-by-step SQL plan.
-  3. **SQL Agent**: Translates the plan into schema-qualified SQL.
-  4. **Validator Agent**: Runs the SQL, checks for errors, and triggers **Self-Learning** on success.
+  3. **SQL Agent**: Translates the plan into schema-qualified SQL with **Anti-Parameterization** guardrails.
+  4. **Validator Agent**: Runs the SQL, checks for errors, and triggers **Self-Correction** or **Self-Learning**.
 
-## 8. Semantic Query Caching (Fast Path)
+## 8. Automated Self-Correction
+- **Logic**: If the `Validator Agent` catches an exception (e.g., syntax error or missing column), it passes the error message and the failed SQL back to the `SQL Agent`.
+- **Refinement**: The SQL Agent analyzes the error and produces a corrected query. This effectively doubles the success rate for complex joins or minor hallucinations.
+
+## 9. Observability: Latency Tracking & Metrics
+- **Latency measuring**: Every phase (Cache check, Classification, Planning, SQL Gen, Validation) is measured using `time.time()`.
+- **Metrics Log**: `metrics.jsonl` stores a JSON line for every execution, containing the question, SQL, result status, and a breakdown of latencies per phase.
+
+## 10. Robust Hybrid Table Selection
+- **Problem**: Narrow domain categories could sometimes "blind" the planner to relevant tables if the classifier was slightly off.
+- **Solution**: The Planner now uses a hybrid selection strategy:
+  1. **Domain Logic**: Tables from the identified category.
+  2. **Keyword Match**: Tables whose names appear in the natural language question.
+  3. **Context Sensitivity**: Tables referenced in similar successful SQL examples retrieved from ChromaDB.
+
+## 11. Semantic Query Caching (Fast Path)
   - Uses ChromaDB to find similar previously answered questions.
   - Applies a **Normalization Layer** to strip "fluff" words (show, list, please, me, all).
   - If the core intent matches an existing record, it returns the cached SQL/Results instantly (<1s).
 
-## 9. Performance & Reliability Enhancements
-
 ## 10. Failure Observability & Schema Guardrails
-- **Failure Log**: `MyVanna.log_failure(...)` now writes every caught SQL exception as a `failure_log` document number in ChromaDB (question + SQL + error + timestamp). That lets you query the vector store for past mistakes instead of losing the failed text.
-- **Schema Qualification Guardrail**: `AgenticSQLPipeline._ensure_schema_qualified` post-processes generated SQL by replacing plain table references with `"schema"."table"` equivalents before execution, which prevents errors like `relation "flight" does not exist` when the planner returns unqualified names.
+- **Failure Log**: `MyVanna.log_failure(...)` now writes every caught SQL exception as a `failure_log` document number in ChromaDB.
+- **SQL Guardrails**:
+  - **Schema Qualification**: Post-processes SQL to replace plain table references with `"schema"."table"`.
+  - **Anti-Parameterization**: Strips LLM-generated parameters (like `:age`) to ensure executable SQL.
+  - **Multi-Statement Guard**: Extracts only the first SELECT if the LLM returns multiple queries.
 
 ## Updated Component Matrix
 

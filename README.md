@@ -5,15 +5,16 @@ A production-ready Business Intelligence toolkit that turns natural language int
 ## 🎯 Key Features
 
 - **Multi-Agent Classifier → Planner → SQL → Validator pipeline**: Now includes a Classifier to narrow down schema focus and reduce latency.
+- **Automated Self-Correction**: Validator catches SQL errors and passes them back to the SQL agent for a targeted fix, significantly increasing success rates.
+- **Latency & Metrics Tracking**: Every query execution is timed per phase and logged to `metrics.jsonl` for performance auditing.
+- **Hybrid Table Selection**: Planner combines domain categories, keyword search, and context from similar examples to ensure relevant tables are always available.
+- **Data-Aware Planning**: Small samples of real data are injected into the planner's context to prevent joining on empty or irrelevant columns.
 - **Fast Path Semantic Caching**: Using ChromaDB to store and retrieve queries semantically. Even if you change "List" to "Show", the system recognizes the intent and returns a 0.5s response.
 - **Schema-aware planning**: Prevents hallucinated columns by introspecting `information_schema`.
 - **Self-learning loop**: Automatically stores successful question/SQL pairs back into ChromaDB.
 - **Connection pooling**: via SQLAlchemy `QueuePool` to reuse PostgreSQL connections.
 - **Local-first stack**: (no external APIs): Ollama LLM + ChromaDB vector store + Postgres.
 - **Workflow logging**: Each agent phase now emits a concise `[Workflow]` line so you can trace which agent ran without dumping raw prompts.
-- **Prompt noise control**: Ollama prompt dumps are suppressed by default and can be re-enabled via `VANNA_SHOW_PROMPTS=1` when debugging.
-- **Failure observability**: Every SQL that errors is captured as a `failure_log` document in ChromaDB so you can revisit the exact question + SQL + error later.
-- **Schema qualification guardrail**: Generated SQL is post-processed to replace plain table names with schema-qualified references before execution, avoiding `relation "flight" does not exist` problems.
 
 ## 🧠 Architecture Overview
 
