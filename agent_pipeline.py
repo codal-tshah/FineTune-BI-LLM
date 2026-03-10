@@ -18,6 +18,10 @@ class AgenticSQLPipeline:
         connect_database(self.vn)
         self.schema_tables = self._load_schema_tables()
         self.schema_map = self._build_schema_map()
+        # Cache expensive data at startup for speed
+        self._cached_rel_text = self._load_relationships()
+        self._cached_samples = self._load_samples()
+        self._cached_all_tables = list(self.schema_map.keys())
     
     def get_table_columns(self, table_name):
         """Fetch actual column metadata from database to prevent hallucination."""
@@ -62,32 +66,19 @@ class AgenticSQLPipeline:
         # Get potential context from ChromaDB
         training_data = self.vn.get_similar_question_sql(question)
 
-        # 2. Fetch actual foreign key relationships from DB metadata (CRITICAL FIX)
-        rel_text = "No explicit foreign key relationships found."
-        try:
-            if connections._engine is not None:
-                rel_df = pd.read_sql(connections.get_relationships_query(), connections._engine)
-                if not rel_df.empty:
-                    rel_text = rel_df.to_string(index=False)
-        except Exception as e:
-            # Fallback check: try with schema if first attempt failed
-            try:
-                rel_df = pd.read_sql(connections.get_relationships_query(), connections._engine)
-                rel_text = rel_df.to_string(index=False)
-            except Exception:
-                print(f"Warning: Could not fetch relationships: {e}")
+        # Use cached relationships (loaded once at startup)
+        rel_text = self._cached_rel_text
         
         # Domain-driven table filtering to reduce context noise
         domain_tables = {
-            "FLIGHT": ["flight", "aircraft", "airport"],
+            "FLIGHT": ["flight", "aircraft", "airport", "booking_leg"],
             "BOOKING": ["booking", "booking_leg", "boarding_pass", "passenger", "account"],
-            "PASSENGER": ["account", "passenger", "frequent_flyer", "phone"],
+            "PASSENGER": ["account", "passenger", "frequent_flyer", "phone", "boarding_pass"],
             "AIRPORT": ["airport", "flight"],
             "MISC": [] # Fallback to all
         }
         
-        all_tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema = '" + os.getenv('DB_SCHEMA', 'public') + "'"
-        all_tables = pd.read_sql(all_tables_query, connections._engine)['table_name'].tolist()
+        all_tables = self._cached_all_tables
         
         # Hybrid table selection to prevent category-induced blindness
         target_tables = set(domain_tables.get(category, []))
@@ -95,7 +86,6 @@ class AgenticSQLPipeline:
         # 1. Add tables mentioned in training examples (context-aware)
         if training_data:
             for example in training_data:
-                # Extract words that look like table names from the SQL in training data
                 sql_words = re.findall(r'[\w\"]+', example.get('sql', ''))
                 for word in sql_words:
                     word_clean = word.strip('"').lower()
@@ -105,7 +95,6 @@ class AgenticSQLPipeline:
         # 2. Keyword-based table selection (failsafe)
         question_words = set(re.findall(r'\w+', question.lower()))
         for t in all_tables:
-            # Check for exact name match or common variations (underscore removal)
             t_clean = t.replace('_', ' ')
             if t in question_words or any(word in question.lower() for word in t_clean.split()):
                 target_tables.add(t)
@@ -114,21 +103,13 @@ class AgenticSQLPipeline:
         if not target_tables:
             target_tables = set(all_tables)
         
+        # Build table context from cached data (no DB queries!)
         table_context_str = ""
         for t in sorted(list(target_tables)):
-            if t in all_tables:
-                cols = self.get_table_columns(t)
-                if cols:
-                    # Fetch small sample of data to show LLM what's inside (e.g., if IDs are NULL)
-                    sample_data = "No samples available."
-                    try:
-                        sample_query = connections.get_data_samples_query(t, limit=3)
-                        sample_df = pd.read_sql(sample_query, connections._engine)
-                        sample_data = sample_df.to_dict('records')
-                    except Exception:
-                        pass
-                    
-                    table_context_str += f"\nTable: {t}\nColumns: {cols}\nSample Data: {sample_data}\n"
+            if t in self.schema_map:
+                cols = self.schema_map[t]
+                sample_data = self._cached_samples.get(t, "No samples available.")
+                table_context_str += f"\nTable: {t}\nColumns: {cols}\nSample Data: {sample_data}\n"
 
         # 3. Sanitize training context to prevent internal ID leakage
         clean_context = "No relevant examples found."
@@ -206,10 +187,14 @@ class AgenticSQLPipeline:
         
         EXACT DATABASE SCHEMA (use ONLY these table and column names):{schema_ref}
 
+        JOIN PATH REFERENCE (use THESE for multi-table queries):
+        {self._cached_rel_text}
+
         Task: Write a single, valid standard SQL query to answer the question using the provided plan. 
         Use the schema-qualified format: "{os.getenv('DB_SCHEMA', 'public')}"."table_name"
         CRITICAL: 
         - ONLY use column names from the EXACT DATABASE SCHEMA above. Cross-check every column.
+        - For multi-table queries, follow the JOIN PATH REFERENCE above to find the correct join columns.
         - DO NOT guess or hallucinate generic 'id' columns. If the table has 'passenger_id', use that.
         - ONLY return the SQL code inside a single code block. 
         - DO NOT provide multiple options. 
@@ -298,6 +283,30 @@ class AgenticSQLPipeline:
                 schema_map[table] = cols
         print(f"[Schema Map] Loaded {len(schema_map)} tables for SQL pre-validation.")
         return schema_map
+
+    def _load_relationships(self):
+        """Load FK relationships once at startup."""
+        try:
+            if connections._engine is not None:
+                rel_df = pd.read_sql(connections.get_relationships_query(), connections._engine)
+                if not rel_df.empty:
+                    return rel_df.to_string(index=False)
+        except Exception as e:
+            print(f"Warning: Could not fetch relationships: {e}")
+        return "No explicit foreign key relationships found."
+
+    def _load_samples(self):
+        """Load sample data for all tables once at startup."""
+        samples = {}
+        for table in self.schema_tables:
+            try:
+                sample_query = connections.get_data_samples_query(table, limit=3)
+                sample_df = pd.read_sql(sample_query, connections._engine)
+                samples[table] = sample_df.to_dict('records')
+            except Exception:
+                samples[table] = "No samples available."
+        print(f"[Samples Cache] Loaded samples for {len(samples)} tables.")
+        return samples
 
     def _validate_sql(self, sql):
         """
