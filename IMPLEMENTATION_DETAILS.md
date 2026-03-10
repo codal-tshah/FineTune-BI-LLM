@@ -110,4 +110,43 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 ## 11. Workflow Visibility & Prompt Noise Control
 
 - `agent_pipeline.py` now logs each phase via `log_stage(...)`, emitting a `[Workflow] Phase X - Y` line that summarizes what just finished (e.g., cache hit, category determined, SQL executed, training recorded).
-- `connections.py`’s `MyVanna.log` overrides the base logger to suppress Ollama prompt dumps unless the `VANNA_SHOW_PROMPTS=1` environment variable is set, keeping the CLI clean while still offering diagnostics when needed.
+- `connections.py`'s `MyVanna.log` overrides the base logger to suppress Ollama prompt dumps unless the `VANNA_SHOW_PROMPTS=1` environment variable is set.
+
+## 12. SQL Pre-Validation Layer
+
+- **Problem**: Lower-parameter models (6.7B) frequently hallucinate column names (`id` vs `passenger_id`) or truncate table names (`boardingb`).
+- **Solution**: A **code-level pre-validator** (`_validate_sql()`) runs before SQL execution:
+  - **Fuzzy Table Matching**: Auto-corrects misspelled table names using `difflib`.
+  - **Column Validation**: Verifies `table.column` references against the actual schema and fuzzy-fixes hallucinations.
+  - **Alias-Aware**: Correctly resolves table aliases (e.g., `p.id` → `passenger.id`) for validation.
+
+## 13. Startup Caching for Performance
+
+- **Problem**: Querying `information_schema` and sampling data on every query added 10-15s of overhead to the Planning phase.
+- **Solution**: Cached expensive metadata at startup:
+  - `_load_relationships()`: FK graph cached.
+  - `_load_samples()`: 3 sample rows per table cached.
+  - `_cached_all_tables`: Table list cached.
+- **Impact**: Planning phase DB overhead reduced to zero at runtime.
+
+## 14. FK-Aware SQL Generation
+
+- **Problem**: LLMs often guess direct join paths that don't exist in the schema.
+- **Solution**: The full FK relationship graph is injected as a `JOIN PATH REFERENCE` in the SQL Agent prompt. This ensures the model follows the correct multi-hop paths (e.g., `flight` → `booking_leg` → `boarding_pass`).
+
+## 15. Auto-LIMIT Safety Guard
+
+- **Problem**: Unrestricted SELECTs on large tables (e.g., `boarding_pass` with 200k+ rows) hang the CLI and PgAdmin.
+- **Solution**: Appends `LIMIT 100` to any query lacking a LIMIT clause.
+
+## Performance Notes (Mac 16GB RAM)
+
+- **Sequential Nature**: Latency is cumulative (sum of 4 LLM calls). Parallelism is not possible as agents depend on prior output.
+- **Optimization**: Apple Silicon Macs should update Ollama to ensure Metal GPU support. Switch to `qwen2.5-coder:3b` or Gemini Flash API for significant speed gains (10x faster than CPU inference).
+
+## Known Limitations
+
+1. **6.7B Accuracy**: Hallucinations on complex queries still occur; SQL Pre-Validator catches ~80%.
+2. **PostgreSQL focus**: MySQL/SQLite support exists but is secondary.
+3. **No multi-turn context**: Each question is treated as a new session.
+

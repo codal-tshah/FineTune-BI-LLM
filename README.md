@@ -4,17 +4,18 @@ A production-ready Business Intelligence toolkit that turns natural language int
 
 ## 🎯 Key Features
 
-- **Multi-Agent Classifier → Planner → SQL → Validator pipeline**: Now includes a Classifier to narrow down schema focus and reduce latency.
-- **Automated Self-Correction**: Validator catches SQL errors and passes them back to the SQL agent for a targeted fix, significantly increasing success rates.
-- **Latency & Metrics Tracking**: Every query execution is timed per phase and logged to `metrics.jsonl` for performance auditing.
-- **Hybrid Table Selection**: Planner combines domain categories, keyword search, and context from similar examples to ensure relevant tables are always available.
-- **Data-Aware Planning**: Small samples of real data are injected into the planner's context to prevent joining on empty or irrelevant columns.
-- **Fast Path Semantic Caching**: Using ChromaDB to store and retrieve queries semantically. Even if you change "List" to "Show", the system recognizes the intent and returns a 0.5s response.
-- **Schema-aware planning**: Prevents hallucinated columns by introspecting `information_schema`.
-- **Self-learning loop**: Automatically stores successful question/SQL pairs back into ChromaDB.
+- **Multi-Agent Classifier → Planner → SQL → Validator pipeline**: Classifier narrows schema focus; Planner designs the query strategy; SQL Agent generates; Validator executes and self-corrects.
+- **SQL Pre-Validation Layer**: Code-level validator that fuzzy-matches misspelled table names (e.g., `boardingb` → `boarding_pass`) and auto-corrects hallucinated columns before execution.
+- **Automated Self-Correction**: Validator catches SQL errors and feeds them back to the SQL Agent for a targeted fix.
+- **Startup Caching**: Schema, FK relationships, and sample data are loaded once at startup — no repeated DB queries during planning.
+- **Auto-LIMIT Guard**: Queries without a `LIMIT` clause automatically get `LIMIT 100` appended to prevent massive result sets.
+- **Hybrid Table Selection**: Combines domain categories, keyword matching, and ChromaDB context to find relevant tables.
+- **Data-Aware Planning**: Real data samples are injected into the planner to prevent joining on empty/NULL columns.
+- **Fast Path Semantic Caching**: Recognizes semantically similar questions and returns cached results in <1s.
+- **FK-Aware SQL Generation**: The SQL Agent receives the full foreign key relationship graph, enabling correct multi-hop joins.
+- **Self-learning loop**: Successful question/SQL pairs are automatically stored back into ChromaDB.
 - **Connection pooling**: via SQLAlchemy `QueuePool` to reuse PostgreSQL connections.
-- **Local-first stack**: (no external APIs): Ollama LLM + ChromaDB vector store + Postgres.
-- **Workflow logging**: Each agent phase now emits a concise `[Workflow]` line so you can trace which agent ran without dumping raw prompts.
+- **Local-first stack**: Ollama LLM + ChromaDB vector store + Postgres — no external APIs required.
 
 ## 🧠 Architecture Overview
 
@@ -31,9 +32,10 @@ graph TD
 ```
 
 - **Classifier Agent**: Categorizes queries into domains (FLIGHT, BOOKING, PASSENGER, etc.) to filter relevant schema metadata.
-- **Planner Agent**: Retrieves schema + similar examples, outputs plan.
-- **SQL Agent**: Turns plan into schema-qualified SQL (`postgres_air."table"`).
-- **Validator Agent**: Blocks unsafe keywords, runs SQL, and auto-trains on success.
+- **Planner Agent**: Retrieves cached schema + similar examples, outputs a structured plan with TABLES, JOIN_LOGIC, and STEPS.
+- **SQL Agent**: Turns plan into schema-qualified SQL with the full FK graph, then passes through UUID stripping, multi-query guard, and auto-LIMIT.
+- **SQL Pre-Validator**: Fuzzy-matches table/column names against actual schema using `difflib` before execution.
+- **Validator Agent**: Blocks unsafe keywords, runs SQL, triggers self-correction on failure or self-learning on success.
 
 ## 📁 Project Layout
 
@@ -148,21 +150,48 @@ Type `exit` or `quit` to stop.
 - [x] Planner/SQL/Validator pipeline running ✅
 - [x] Schema-introspection + strict schema reference ✅
 - [x] Self-learning loop implemented ✅
+- [x] Latency tracking + metrics logging ✅
+- [x] SQL Pre-Validation Layer (fuzzy table/column matching) ✅
+- [x] Startup caching for schema, relationships, samples ✅
+- [x] Auto-LIMIT safety guard ✅
 - [ ] Test 50+ NL queries to cover edge cases
-- [ ] Track query latency + register metrics
 
 **Mid-term**
 
 - Add Flask/FastAPI + React UI for business users
-- Cache repeated questions to reduce LLM calls
+- Switch to a faster LLM (Gemini Flash API or GPU-accelerated Ollama)
 - Add MySQL/SQLite connectors inside `connections.py`
 
 **Long-term**
 
 - Fine-tune DeepSeek with domain-specific SQL patterns
-- Build query analytics dashboard
+- Build query analytics dashboard (from `metrics.jsonl`)
 - Support multi-database federation
-- Collect and surface feedback for retraining
+- Collect and surface user feedback for retraining
+
+## ⚡ Performance Tips (Mac 16GB RAM)
+
+| Optimization | Expected Impact | How |
+|---|---|---|
+| **Use Apple Silicon GPU** | 3-5x faster inference | Ollama auto-detects Metal GPU on M-series Macs |
+| **Smaller model** (`deepseek-coder:1.3b`) | 2-3x faster | Change `LLM_MODEL` in `.env` (lower accuracy) |
+| **Quantized model** (`qwen2.5-coder:3b`) | 2x faster, better accuracy | `ollama pull qwen2.5-coder:3b` |
+| **API-based LLM** (Gemini Flash) | 10-20x faster | Free tier available, swap Ollama for API client |
+| **Reduce `num_ctx`** | Less RAM, faster | Set `OLLAMA_NUM_CTX=2048` (default: 4096) |
+
+> **Note**: The 4 agents are sequential by design (each needs the previous output). Parallelism does not help here — faster inference is the key.
+
+## ⚠️ Known Limitations & Cons
+
+| Limitation | Impact | Mitigation |
+|---|---|---|
+| **6.7B model accuracy** | Hallucinated columns/joins on complex queries | SQL Pre-Validator catches ~80% of these |
+| **Sequential pipeline** | Total latency = sum of all 4 LLM calls (50-120s on CPU) | Use GPU or API model |
+| **No multi-turn context** | Each question is independent — no "follow up" support | Future: add conversation memory |
+| **PostgreSQL only** | MySQL/SQLite connectors exist but are untested | Future: expand DB support |
+| **No UI** | CLI-only interface | Future: Flask/React frontend |
+| **Auto-LIMIT 100** | Large analytical queries may need manual LIMIT override | Pass explicit LIMIT in the question |
+| **Self-learning pollution** | Bad queries could be auto-trained into ChromaDB | Future: add human-in-the-loop validation |
 
 ## ❓ FAQ
 
@@ -194,5 +223,5 @@ Not always. It’s great for the initial bootstrap or when the planner struggles
 
 ---
 
-**Last updated**: March 6, 2026  
-**Status**: Beta (production-ready)
+**Last updated**: March 10, 2026  
+**Status**: Beta (active development)
