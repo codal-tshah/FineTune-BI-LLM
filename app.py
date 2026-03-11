@@ -11,7 +11,7 @@ This module provides a unified interface for:
 import argparse
 from typing import List
 
-from agent_pipeline import AgenticSQLPipeline
+from agent_pipeline_v2 import AgenticSQLPipeline_V2
 
 def ask_question(question: str):
     """
@@ -28,7 +28,7 @@ def ask_question(question: str):
     Returns:
         pandas.DataFrame with query results, or None if error
     """
-    agent = AgenticSQLPipeline()
+    agent = AgenticSQLPipeline_V2()
     results = agent.run(question)
     return results
 
