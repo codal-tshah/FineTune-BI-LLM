@@ -141,7 +141,7 @@ class AgenticSQLPipeline:
            - To find a person by email, check 'booking.email' or 'account.login'.
            - To get boarding pass details, use 'boarding_pass' and join with 'passenger'.
         7. Focus on correctness: If a column doesn't exist, use the most plausible path using provided IDs.
-        
+        8. PARSIMONY RULE: Use the MINIMUM number of tables possible. If a question can be answered from one table, DO NOT join others. Do not add filters (WHERE clauses) that were not explicitly mentioned in the question.
         Plan format: 
         TABLES: [table1, table2]
         JOIN_LOGIC: [table1.col = table2.col or 'None']
