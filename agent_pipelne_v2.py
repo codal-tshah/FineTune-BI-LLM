@@ -12,7 +12,7 @@ from connections import (
     get_schema_query,
 )
 
-class AgenticSQLPipeline:
+class AgenticSQLPipeline_V2:
     def __init__(self):
         self.vn = get_vanna_instance()
         connect_database(self.vn)
@@ -403,6 +403,6 @@ class AgenticSQLPipeline:
         return qualified_sql
 
 if __name__ == "__main__":
-    agent = AgenticSQLPipeline()
+    agent = AgenticSQLPipeline_V2()
     # Test complex query
     print(agent.run("names of all passengers on flight id 100"))
