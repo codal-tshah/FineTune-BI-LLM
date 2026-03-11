@@ -1,0 +1,262 @@
+[
+    {
+        "question": "How many flights are there?",
+        "sql": "SELECT count(*) FROM postgres_air.flight",
+        "sample_results": [
+            {
+                "count": 683178
+            }
+        ]
+    },
+    {
+        "question": "What is the total price of all bookings?",
+        "sql": "SELECT sum(price) FROM postgres_air.booking",
+        "sample_results": [
+            {
+                "sum": 5643232834.35
+            }
+        ]
+    },
+    {
+        "question": "How many flights are not scheduled yet?",
+        "sql": "SELECT count(*) FROM postgres_air.flight WHERE status = 'scheduled'",
+        "sample_results": [
+            {
+                "count": 0
+            }
+        ]
+    },
+    {
+        "question": "What is the average range of aircrafts?",
+        "sql": "SELECT avg(range) FROM postgres_air.aircraft",
+        "sample_results": [
+            {
+                "avg": 7600.0
+            }
+        ]
+    },
+    {
+        "question": "How many different frequent flyer levels do we have?",
+        "sql": "SELECT count(distinct level) FROM postgres_air.frequent_flyer",
+        "sample_results": [
+            {
+                "count": 4
+            }
+        ]
+    },
+    {
+        "question": "What is the most common phone type among our accounts?",
+        "sql": "SELECT phone_type, count(*) FROM postgres_air.phone GROUP BY phone_type ORDER BY count DESC LIMIT 1",
+        "sample_results": [
+            {
+                "phone_type": "mobile",
+                "count": 514204
+            }
+        ]
+    },
+    {
+        "question": "What is the earliest flight scheduled departure time?",
+        "sql": "SELECT min(scheduled_departure) FROM postgres_air.flight",
+        "sample_results": [
+            {
+                "min": "2024-05-27T00:55:00+05:30"
+            }
+        ]
+    },
+    {
+        "question": "Which account has the longest name (first and last combined)?",
+        "sql": "SELECT first_name, last_name FROM postgres_air.account ORDER BY length(concat(first_name,last_name)) DESC LIMIT 1",
+        "sample_results": [
+            {
+                "first_name": "NATHANIEL",
+                "last_name": "SAN FRANCISCO"
+            }
+        ]
+    },
+    {
+        "question": "Who are our frequent flyers with more than two award points?",
+        "sql": "SELECT first_name, last_name FROM postgres_air.frequent_flyer WHERE award_points > 2",
+        "sample_results": [
+            {
+                "first_name": "EVA",
+                "last_name": "AMOS"
+            },
+            {
+                "first_name": "KAI",
+                "last_name": "HYDE"
+            },
+            {
+                "first_name": "GAEL",
+                "last_name": "JAN"
+            },
+            {
+                "first_name": "TROY",
+                "last_name": "JOY"
+            },
+            {
+                "first_name": "IAN",
+                "last_name": "CARR"
+            }
+        ]
+    },
+    {
+        "question": "How many flights have been scheduled in total?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.flight",
+        "sample_results": [
+            {
+                "count": 683178
+            }
+        ]
+    },
+    {
+        "question": "What is the total number of frequent flyer accounts?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.frequent_flyer",
+        "sample_results": [
+            {
+                "count": 128346
+            }
+        ]
+    },
+    {
+        "question": "How many different aircraft codes are there in the system?",
+        "sql": "SELECT COUNT(DISTINCT aircraft_code) FROM postgres_air.flight",
+        "sample_results": [
+            {
+                "count": 12
+            }
+        ]
+    },
+    {
+        "question": "What is the average flight range for all aircrafts?",
+        "sql": "SELECT AVG(range) FROM postgres_air.aircraft",
+        "sample_results": [
+            {
+                "avg": 7600.0
+            }
+        ]
+    },
+    {
+        "question": "Which flight had the longest scheduled departure time?",
+        "sql": "SELECT flight_no FROM postgres_air.flight ORDER BY (scheduled_departure - scheduled_arrival) DESC LIMIT 1",
+        "sample_results": [
+            {
+                "flight_no": "3088"
+            }
+        ]
+    },
+    {
+        "question": "Who are the frequent flyers with more than one award points?",
+        "sql": "SELECT first_name, last_name FROM postgres_air.frequent_flyer f JOIN (SELECT frequent_flyer_id FROM postgres_air.frequent_flyer WHERE award_points > 1) s ON f.frequent_flyer_id = s.frequent_flyer_id",
+        "sample_results": [
+            {
+                "first_name": "EVA",
+                "last_name": "AMOS"
+            },
+            {
+                "first_name": "KAI",
+                "last_name": "HYDE"
+            },
+            {
+                "first_name": "GAEL",
+                "last_name": "JAN"
+            },
+            {
+                "first_name": "TROY",
+                "last_name": "JOY"
+            },
+            {
+                "first_name": "IAN",
+                "last_name": "CARR"
+            }
+        ]
+    },
+    {
+        "question": "What is the average price of all bookings?",
+        "sql": "SELECT AVG(price) FROM postgres_air.booking",
+        "sample_results": [
+            {
+                "avg": 1000.0029831128207
+            }
+        ]
+    },
+    {
+        "question": "What is the total number of flights scheduled?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.flight WHERE status = 'scheduled'",
+        "sample_results": [
+            {
+                "count": 0
+            }
+        ]
+    },
+    {
+        "question": "How many flights are there in total?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.flight",
+        "sample_results": [
+            {
+                "count": 683178
+            }
+        ]
+    },
+    {
+        "question": "What is the average range of all aircrafts?",
+        "sql": "SELECT AVG(range) FROM postgres_air.aircraft",
+        "sample_results": [
+            {
+                "avg": 7600.0
+            }
+        ]
+    },
+    {
+        "question": "How many passengers are there?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.passenger",
+        "sample_results": [
+            {
+                "count": 21140719
+            }
+        ]
+    },
+    {
+        "question": "How many frequent flyer accounts do we have?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.frequent_flyer",
+        "sample_results": [
+            {
+                "count": 128346
+            }
+        ]
+    },
+    {
+        "question": "How many flights are scheduled yet?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.flight WHERE status = 'scheduled'",
+        "sample_results": [
+            {
+                "count": 0
+            }
+        ]
+    },
+    {
+        "question": "Who are the frequent flyers with more than one award point?",
+        "sql": "SELECT first_name, last_name FROM postgres_air.frequent_flyer WHERE award_points > 1",
+        "sample_results": [
+            {
+                "first_name": "EVA",
+                "last_name": "AMOS"
+            },
+            {
+                "first_name": "KAI",
+                "last_name": "HYDE"
+            },
+            {
+                "first_name": "GAEL",
+                "last_name": "JAN"
+            },
+            {
+                "first_name": "TROY",
+                "last_name": "JOY"
+            },
+            {
+                "first_name": "IAN",
+                "last_name": "CARR"
+            }
+        ]
+    }
+]
