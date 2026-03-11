@@ -606,17 +606,34 @@ class AgenticSQLPipeline_V2:
         
         # B. Context-aware tables (from training examples)
         training_data = self.vn.get_similar_question_sql(question)
+        clean_context = "No relevant examples found."
         if training_data:
+            # ONLY use training data if it shares keywords with the question
+            valid_examples = []
             for item in training_data:
-                sql_words = re.findall(r'[\w\"]+', item.get('sql', ''))
-                for word in sql_words:
-                    word_clean = word.strip('"').lower()
-                    if word_clean in all_tables:
-                        target_tables.add(word_clean)
+                q_example = item.get('question', '').lower()
+                # Check if example is actually relevant to question keywords
+                if any(word in q_example for word in ["airport", "flight", "booking", "passenger", "account"] if word in question.lower()):
+                    valid_examples.append(item)
+                    # Also extract tables from these relevant examples
+                    sql_words = re.findall(r'[\w\"]+', item.get('sql', ''))
+                    for word in sql_words:
+                        word_clean = word.strip('"').lower()
+                        if word_clean in all_tables:
+                            target_tables.add(word_clean)
+            
+            if valid_examples:
+                context_parts = []
+                for item in valid_examples:
+                    s_masked = re.sub(r"'(.*?)'", "'<VALUE>'", item.get('sql', ''))
+                    context_parts.append(f"Q: {item.get('question', 'N/A')}\nSQL: {s_masked}")
+                clean_context = "\n---\n".join(context_parts)
 
         # C. Domain-Driven Expansion (Ensures bridges like booking_leg are included)
         domain_keywords = {
             "flight": ["flight", "aircraft", "airport", "booking_leg"],
+            "departure": ["flight", "airport"],
+            "arrival": ["flight", "airport"],
             "booking": ["booking", "booking_leg", "passenger", "boarding_pass"],
             "passenger": ["passenger", "account", "frequent_flyer", "booking_leg"],
             "airport": ["airport"]
@@ -627,25 +644,18 @@ class AgenticSQLPipeline_V2:
                     if t in all_tables:
                         target_tables.add(t)
 
-        # Fallback if still empty
+        # Fallback if still empty (use primary tables)
         if not target_tables:
-            target_tables = set(all_tables[:10])
+            primary_tables = ["flight", "booking", "passenger", "airport", "account"]
+            target_tables = set(t for t in primary_tables if t in all_tables)
 
-        # 2. Build Table Context & Mask Values
+        # 2. Build Table Context
         table_context_str = ""
         for t in sorted(list(target_tables)):
             if t in self.schema_map:
                 cols = self.schema_map[t]
                 samples = self._cached_samples.get(t, "N/A")
                 table_context_str += f"\nTable: {t}\nColumns: {cols}\nSamples: {samples}\n"
-
-        clean_context = "No relevant examples found."
-        if training_data:
-            context_parts = []
-            for item in training_data:
-                s_masked = re.sub(r"'(.*?)'", "'<VALUE>'", item.get('sql', ''))
-                context_parts.append(f"Q: {item.get('question', 'N/A')}\nSQL: {s_masked}")
-            clean_context = "\n---\n".join(context_parts)
 
         prompt = f"""
         Question: {question}
@@ -657,12 +667,14 @@ class AgenticSQLPipeline_V2:
         CRITICAL RULES:
         1. ONLY use tables/columns listed in EXPLICIT SCHEMA.
         2. NO HALLUCINATION: Do not assume columns exist.
-        3. NO FILTER HALLUCINATION: Do not add WHERE values unless they are in the 'Question'.
-        4. SHORTEST PATH: Join booking_leg and passenger directly using 'booking_id'.
-        5. JOIN ENFORCEMENT: Every table in TABLES must have a JOIN_LOGIC entry.
-        6. IDENTIFIER GUIDE:
-           - Link flight and passenger via: flight -> booking_leg -> passenger.
-           - Path: flight.flight_id = booking_leg.flight_id, booking_leg.booking_id = passenger.booking_id.
+        3. STRICT NO-FILTER RULE: DO NOT add WHERE clauses with specific values unless explicitly provided in the 'Question'.
+        4. RELEVANCY CHECK: Ignore 'STRUCTURAL EXAMPLES' that are not related to the current Question.
+        5. PARSIMONY RULE: Use the ABSOLUTE MINIMUM number of tables. If a Question can be answered from a SINGLE table (e.g., 'How many flights?', 'List airports'), DO NOT JOIN anything else. Joining when not required is a failure.
+        6. JOIN ENFORCEMENT: Every table in TABLES must have a JOIN_LOGIC entry.
+        7. IDENTIFIER GUIDE:
+           - ONLY use joins if the Question requires data from different domains.
+           - Linking FLIGHT and PASSENGER: flight -> booking_leg -> passenger.
+           - Arrival vs Departure: 'arrivals' maps to arrival_airport, 'departures' maps to departure_airport.
         
         Output Format:
         CATEGORY: [FLIGHT|BOOKING|PASSENGER|AIRPORT|MISC]
@@ -712,7 +724,8 @@ class AgenticSQLPipeline_V2:
         Task: Write a single, valid standard SQL query.
         - Use schema format: "{os.getenv('DB_SCHEMA', 'public')}"."table_name"
         - DO NOT USE CTEs (WITH clauses).
-        - DO NOT HALLUCINATE VALUES like 'LAX'.
+        - ALIAS CONSISTENCY: Every alias used (e.g., 'p', 'b') MUST be defined in the FROM or JOIN clause (e.g., FROM table AS p).
+        - STRICT NO-FILTER HALLUCINATION: Do not add any WHERE filters for strings or dates (like 'John', '2023-01-01') that are NOT in the 'Original Question'.
         - Follow the JOIN_LOGIC in the Plan strictly.
         - ONLY return SQL code.
         """
@@ -749,10 +762,11 @@ class AgenticSQLPipeline_V2:
         """Phase 3: Code-level safety + Execution + Self-Learning."""
         print("[Validator Agent] Executing SQL...")
         
-        # Safety Check
+        # Safety Check (Regex with word boundaries to avoid blocking columns like update_ts)
         forbidden = ["drop", "delete", "update", "insert", "truncate"]
-        if any(cmd in sql.lower() for cmd in forbidden):
-            return None, "Blocked: Forbidden command.", False
+        for cmd in forbidden:
+            if re.search(rf'\b{cmd}\b', sql.lower()):
+                return None, f"Blocked: Forbidden command '{cmd}' detected.", False
 
         try:
             results = self.vn.run_sql(sql)
@@ -766,17 +780,18 @@ class AgenticSQLPipeline_V2:
             self.vn.log_failure(question, sql, error_msg)
             return None, error_msg, False
 
-    def run(self, question):
+    def run(self, question, use_cache=True):
         latencies = {}
         start_time = time.time()
 
         # --- Phase 0: Cache ---
-        p0_start = time.time()
-        self.log_stage("Phase 0 - Cache", "Checking semantic cache")
-        _, cached_results = self.vn.get_cached_query(question)
-        latencies["cache"] = time.time() - p0_start
-        if cached_results is not None:
-            return cached_results
+        if use_cache:
+            p0_start = time.time()
+            self.log_stage("Phase 0 - Cache", "Checking semantic cache")
+            _, cached_results = self.vn.get_cached_query(question)
+            latencies["cache"] = time.time() - p0_start
+            if cached_results is not None:
+                return cached_results
 
         # --- Phase 1: Architect (3B) ---
         p1_start = time.time()
@@ -896,41 +911,62 @@ class AgenticSQLPipeline_V2:
                 print(f"[SQL Pre-Validator] Fixing table: '{ref}' → '{correct_table}'")
                 fixed_sql = re.sub(rf'(?<![a-zA-Z_]){re.escape(ref)}(?![a-zA-Z_])', correct_table, fixed_sql)
 
-        # --- Step 2: Validate column references (alias.column or table.column) ---
-        alias_map = {}
-        # Improved alias extraction: MATCHING "table AS alias" or "table alias"
+        # Build table -> alias and alias -> table maps
+        table_to_alias = {}
+        alias_to_table = {}
         alias_pattern = re.findall(
-            r'(?:FROM|JOIN)\s+(?:"?[\w]+"?\.)?"?([a-zA-Z_]\w*)"?\s+(?:AS\s+)?([a-zA-Z_]\w*)',
+            r'(?:FROM|JOIN)\s+(?:"?[a-zA-Z_]\w*"?\.)?"?([a-zA-Z_]\w*)"?\s+(?:AS\s+)?([a-zA-Z_]\w*)',
             fixed_sql,
             re.IGNORECASE
         )
         for table_ref, alias in alias_pattern:
             table_clean = table_ref.strip('"').lower()
             alias_clean = alias.strip('"').lower()
-            if alias_clean in ('on', 'where', 'group', 'order', 'limit', 'and', 'join'):
+            if alias_clean in ('on', 'where', 'group', 'order', 'limit', 'having', 'and', 'or', 'as', 'join', 'inner', 'left', 'right', 'full'):
                 continue
             if table_clean in self.schema_map:
-                alias_map[alias_clean] = table_clean
+                table_to_alias[table_clean] = alias
+                alias_to_table[alias_clean] = table_clean
 
-        # Find all qualifier.column references
+        # --- Step 2: Validate column references (qualifier.column) ---
         col_refs = re.findall(r'([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)', fixed_sql)
         for qualifier, column in col_refs:
             q_lower = qualifier.strip('"').lower()
             c_lower = column.strip('"').lower()
+
             if q_lower == schema:
                 continue
 
-            actual_table = alias_map.get(q_lower, q_lower)
-            if actual_table in self.schema_map:
-                valid_cols = self.schema_map[actual_table]
-                valid_cols_lower = [c.lower() for c in valid_cols]
-                
-                if c_lower not in valid_cols_lower:
-                    matches = difflib.get_close_matches(c_lower, valid_cols_lower, n=1, cutoff=0.6)
-                    if matches:
-                        correct_col = valid_cols[valid_cols_lower.index(matches[0])]
-                        print(f"[SQL Pre-Validator] Fixing column: '{qualifier}.{column}' → '{qualifier}.{correct_col}'")
-                        fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{qualifier}.{correct_col}")
+            # Case A: Qualifier is a table name that HAS an alias
+            if q_lower in table_to_alias:
+                correct_alias = table_to_alias[q_lower]
+                print(f"[SQL Pre-Validator] Alias Mismatch: Replacing table name '{qualifier}' with alias '{correct_alias}'")
+                fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{correct_alias}.{column}")
+                q_lower = correct_alias.lower() # Continue with the alias for column validation
+
+        # Resolve qualifier (now likely an alias) to table
+        actual_table = alias_to_table.get(q_lower, q_lower)
+
+        if actual_table not in self.schema_map:
+            # NEW: If the qualifier is NOT a known table or defined alias,
+            # try fuzzy matching it against DEFINED ALIASES.
+            alias_matches = difflib.get_close_matches(q_lower, list(alias_to_table.keys()), n=1, cutoff=0.7)
+            if alias_matches:
+                q_lower = alias_matches[0]
+                actual_table = alias_to_table[q_lower]
+                print(f"[SQL Pre-Validator] Hallucinated Alias: Fixing '{qualifier}' → '{q_lower}'")
+                fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{q_lower}.{column}")
+
+        if actual_table in self.schema_map:
+            valid_columns = self.schema_map[actual_table]
+            valid_columns_lower = [c.lower() for c in valid_columns]
+
+            if c_lower not in valid_columns_lower:
+                matches = difflib.get_close_matches(c_lower, valid_columns_lower, n=1, cutoff=0.6)
+                if matches:
+                    correct_col = valid_columns[valid_columns_lower.index(matches[0])]
+                    print(f"[SQL Pre-Validator] Fixing column: '{qualifier}.{column}' → '{qualifier}.{correct_col}'")
+                    fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{qualifier}.{correct_col}")
         
         return fixed_sql
 
