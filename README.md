@@ -43,6 +43,7 @@ graph TD
 
 | File/folder | Responsibility |
 |-------------|----------------|
+
 | `app.py` | Entry point with interactive CLI + `ask_question` helper |
 | `agent_pipeline.py` | Core 4-agent pipeline (Classifier, Planner, SQL, Validator) |
 | `connections.py` | Vanna/DB setup, connection pooling, and **Semantic Normalization Caching** |
@@ -137,6 +138,7 @@ Type `exit` or `quit` to stop.
 
 | Scenario | Use synthetic generator? | Why |
 |----------|--------------------------|-----|
+
 | First-time setup | ✅ Yes | Seeds ChromaDB with diverse examples quickly. |
 | Adding new tables | ✅ Yes | LLM learns new schema faster. |
 | Pattern failures (joins/filters) | ✅ Yes | Provide targeted examples. |
