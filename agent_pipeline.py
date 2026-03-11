@@ -1,23 +1,37 @@
 import os
 import json
 import re
+import time
+import difflib
 import pandas as pd
-from connections import get_vanna_instance, connect_database, get_columns_query, _engine
+import connections
+from connections import (
+    get_vanna_instance,
+    connect_database,
+    get_columns_query,
+    get_schema_query,
+)
 
 class AgenticSQLPipeline:
     def __init__(self):
         self.vn = get_vanna_instance()
         connect_database(self.vn)
+        self.schema_tables = self._load_schema_tables()
+        self.schema_map = self._build_schema_map()
+        # Cache expensive data at startup for speed
+        self._cached_rel_text = self._load_relationships()
+        self._cached_samples = self._load_samples()
+        self._cached_all_tables = list(self.schema_map.keys())
     
     def get_table_columns(self, table_name):
         """Fetch actual column metadata from database to prevent hallucination."""
         try:
-            from connections import _engine
-            if _engine is None:
+            if connections._engine is None:
                 return []
             query = get_columns_query(table_name)
-            result = pd.read_sql(query, _engine)
-            return result.to_dict('records')
+            result = pd.read_sql(query, connections._engine)
+            # Return a simple list of column names for prompt clarity
+            return result['column_name'].tolist()
         except Exception as e:
             print(f"Warning: Could not fetch columns for {table_name}: {e}")
             return []
@@ -31,13 +45,13 @@ class AgenticSQLPipeline:
         Question: {question}
         
         Available Domains:
-        - FLIGHT: Queries about flights, status, schedules, aircraft codes.
-        - BOOKING: Queries about bookings, prices, tickets, boarding passes, booking legs.
-        - PASSENGER: Queries about passengers, accounts, frequent flyer levels, phone numbers.
-        - AIRPORT: Queries about airport names, locations, timezones, countries.
-        - MISC: General metadata or unknown.
+        - FLIGHT: Queries about flight status, schedules, aircraft codes, or departures/arrivals.
+        - BOOKING: Queries about bookings, prices, tickets, boarding passes, booking legs, or seat assignments.
+        - PASSENGER: Queries about passengers, accounts, frequent flyer levels, phone numbers, or person details.
+        - AIRPORT: Queries about airport names, locations, timezones, countries, or geographic codes.
+        - MISC: General metadata, unknown, or systemic queries.
 
-        Task: Return ONLY the domain name in uppercase (e.g., FLIGHT).
+        Task: Return ONLY the domain name in uppercase (e.g., BOOKING). If you are unsure, return MISC.
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         # Filter out potential <|thought|> or other special tokens
@@ -51,93 +65,370 @@ class AgenticSQLPipeline:
         print(f"[Planner Agent] Analyzing {category} question...")
         # Get potential context from ChromaDB
         training_data = self.vn.get_similar_question_sql(question)
+
+        # Use cached relationships (loaded once at startup)
+        rel_text = self._cached_rel_text
         
-        # Domain-driven table filtering to reduce context noise
+        # Domain-driven table filtering - adding 'booking_leg' and 'boarding_pass' as primary bridges
         domain_tables = {
-            "FLIGHT": ["flight", "aircraft", "airport"],
+            "FLIGHT": ["flight", "aircraft", "airport", "booking_leg", "boarding_pass"],
             "BOOKING": ["booking", "booking_leg", "boarding_pass", "passenger", "account"],
-            "PASSENGER": ["account", "passenger", "frequent_flyer", "phone"],
+            "PASSENGER": ["account", "passenger", "frequent_flyer", "phone", "boarding_pass", "booking_leg"],
             "AIRPORT": ["airport", "flight"],
             "MISC": [] # Fallback to all
         }
         
-        # New: Get strict schema for all tables in the database to prevent hallucinating column names.
-        # This provides a complete set of table and column information.
-        from connections import _engine
+        all_tables = self._cached_all_tables
         
-        # Ensure engine is connected
-        if _engine is None:
-            connect_database(self.vn)
-            from connections import _engine
-
-        all_tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema = '" + os.getenv('DB_SCHEMA', 'public') + "'"
-        all_tables = pd.read_sql(all_tables_query, _engine)['table_name'].tolist()
+        # Hybrid table selection to prevent category-induced blindness
+        target_tables = set(domain_tables.get(category, []))
         
-        # Narrow down tables based on category to save LLM context space
-        target_tables = domain_tables.get(category, [])
+        # 1. Add tables mentioned in training examples (context-aware)
+        if training_data:
+            for example in training_data:
+                sql_words = re.findall(r'[\w\"]+', example.get('sql', ''))
+                for word in sql_words:
+                    word_clean = word.strip('"').lower()
+                    if word_clean in all_tables:
+                        target_tables.add(word_clean)
+        
+        # 2. Keyword-based table selection (failsafe)
+        question_words = set(re.findall(r'\w+', question.lower()))
+        for t in all_tables:
+            t_clean = t.replace('_', ' ')
+            if t in question_words or any(word in question.lower() for word in t_clean.split()):
+                target_tables.add(t)
+        
+        # Fallback to all if still empty
         if not target_tables:
-            target_tables = all_tables
+            target_tables = set(all_tables)
         
+        # Build table context from cached data (no DB queries!)
         table_context_str = ""
-        for t in target_tables:
-            if t in all_tables:
-                cols = self.get_table_columns(t)
-                if cols:
-                    table_context_str += f"\nTable: {t}\nColumns: {cols}\n"
+        for t in sorted(list(target_tables)):
+            if t in self.schema_map:
+                cols = self.schema_map[t]
+                sample_data = self._cached_samples.get(t, "No samples available.")
+                table_context_str += f"\nTable: {t}\nColumns: {cols}\nSample Data: {sample_data}\n"
+
+        # 3. Sanitize training context & Mask values to prevent copying
+        clean_context = "No relevant examples found."
+        if training_data:
+            context_parts = []
+            for item in training_data:
+                q = item.get('question', 'N/A')
+                s = item.get('sql', 'N/A')
+                # MASK ALL LITERAL VALUES: Replaces 'JFK' with '<VALUE>'
+                s_masked = re.sub(r"'(.*?)'", "'<VALUE>'", s)
+                context_parts.append(f"Question: {q}\nSQL: {s_masked}")
+            clean_context = "\n---\n".join(context_parts)
 
         prompt = f"""
         Category: {category}
         Question: {question}
-        Available Context: {training_data}
-        Strict Schema Reference:
-        {table_context_str}
+        Strict Relationship Reference (USE THESE FOR JOINS - DO NOT INVENT IDS):{rel_text}
+        
+        Potential Context (STRUCTURAL EXAMPLES ONLY - DO NOT COPY VALUES LIKE 'LAX' or DATES): {clean_context}
+        Strict Schema Reference:{table_context_str}
         
         Task: Create a step-by-step plan to solve this using SQL. 
         CRITICAL RULES:
         1. ONLY use tables and columns exactly as named in the 'Strict Schema Reference' above.
-        2. DO NOT hallucinate columns or names. If you don't see a column like 'login_email', check if 'email' or 'login' exists in a related table.
-        3. Identifiers guide:
+        2. NO HALLUCINATION: DO NOT assume a table has a generic 'id' or 'uid' column. Look at the column names provided. If it has 'passenger_id', use that.
+        3. NO FILTER HALLUCINATION: DO NOT add WHERE clauses with specific values (like 'LAX', 'DEN', or specific dates) unless they are in the user question.
+        4. SHORTEST PATH: Join booking_leg and passenger directly using 'booking_id'. Do not use 'boarding_pass' unless the question asks for pass details.
+        5. CONTEXT PRUNING: Only use retrieved 'Potential Context' if it is DIRECTLY RELEVANT to the current question. 
+        6. JOIN ENFORCEMENT: Every table mentioned in TABLES must have a corresponding entry in JOIN_LOGIC.
+        7. Identifiers guide:
            - To find a person by email, check 'booking.email' or 'account.login'.
-           - To get boarding pass details, use 'boarding_pass' and join with 'passenger'.
-           - To connect account to passenger, you may need a path like account -> booking -> passenger or account -> passenger.
-        4. Focus on correctness: If a column doesn't exist, use the most plausible path using provided IDs.
+           - Path: flight.flight_id -> booking_leg.flight_id -> booking_leg.booking_id -> passenger.booking_id.
+        8. PARSIMONY RULE: Use the MINIMUM number of tables possible. If a question can be answered from one table, DO NOT join others.
         
         Plan format: 
-        TABLES: [table1, table2]
-        JOIN_LOGIC: [table1.col = table2.col]
+        TABLES: [table1, table2, table3]
+        JOIN_LOGIC: [table1.col = table2.col, table2.col = table3.col]
         STEPS: [1. Filter by X, 2. Join Y, 3. Aggregate Z]
+        
+        CRITICAL BRIDGE KNOWLEDGE:
+        - To link FLIGHT and PASSENGER, you MUST go through BOOKING_LEG.
+        - Path: flight.flight_id -> booking_leg.flight_id -> booking_leg.booking_id -> passenger.booking_id (or boarding_pass).
+        - NEVER join flight and passenger directly.
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         return response
+ 
+    def log_stage(self, stage, status, detail=None):
+        """Structured workflow logging for CLI visibility."""
+        detail_str = f" ({detail})" if detail else ""
+        print(f"[Workflow] {stage}: {status}{detail_str}")
 
-    def sql_agent(self, question, plan):
+    def sql_agent(self, question, plan, previous_sql=None, error_message=None):
         """
         SQL Agent: Generates the actual SQL query based on the question and plan.
+        If previous_sql and error_message are provided, it attempts to fix the SQL.
         """
         print("[SQL Agent] Generating SQL based on plan...")
+        
+        correction_prompt = ""
+        if previous_sql and error_message:
+            print(f"[SQL Agent] Attempting to fix previous error: {error_message}")
+            correction_prompt = f"""
+            The previous SQL query failed:
+            SQL: {previous_sql}
+            Error: {error_message}
+            
+            Please analyze the error and Provide a FIXED SQL query.
+            """
+
+        # 1. DYNAMIC SCHEMA PRUNING: Only send schema for tables mentioned in the Plan
+        # Extract table names from the plan (handles "TABLES: [a, b]" or just "a, b")
+        plan_tables = []
+        table_section = re.search(r'TABLES:\s*\[?([\w\s,]+)\]?', plan, re.IGNORECASE)
+        if table_section:
+            plan_tables = [t.strip().lower() for t in table_section.group(1).split(',')]
+        
+        # Build a pruned schema reference for the SQL Agent
+        schema_ref = ""
+        tables_found = 0
+        for table in plan_tables:
+            if table in self.schema_map:
+                cols = self.schema_map[table]
+                schema_ref += f"\n  {table}: [{', '.join(cols)}]"
+                tables_found += 1
+        
+        # Fallback to full schema if parsing failed or no tables found
+        if tables_found == 0:
+            for table, cols in self.schema_map.items():
+                schema_ref += f"\n  {table}: [{', '.join(cols)}]"
+
         prompt = f"""
         Original Question: {question}
         Plan: {plan}
+        {correction_prompt}
         
-        Task: Write a standard SQL query to answer the question using the provided plan. 
+        EXACT DATABASE SCHEMA (ONLY use these tables):{schema_ref}
+
+        JOIN PATH REFERENCE:
+        {self._cached_rel_text}
+
+        Task: Write a single, valid standard SQL query to answer the question using the EXACT plan and schema provided. 
         Use the schema-qualified format: "{os.getenv('DB_SCHEMA', 'public')}"."table_name"
-        ONLY return the SQL code inside a code block.
+        CRITICAL: 
+        - DO NOT USE CTEs: Do not use 'WITH' clauses or sub-queries unless absolutely necessary. Use simple JOINS.
+        - DO NOT HALLUCINATE VALUES: Do not add WHERE filters with specific strings or IDs (like 'LAX' or 'DEN') unless they were in the 'Original Question'.
+        - ONLY use tables and columns listed in the 'EXACT DATABASE SCHEMA' section. 
+        - Follow the JOIN_LOGIC in the Plan strictly.
+        - For multi-table queries, cross-check against the JOIN PATH REFERENCE.
+        - ONLY return the SQL code inside a code block. 
+        - DO NOT guess or hallucinate columns.
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         
-        # Clean response from thinking tokens or LLM preambles
-        clean_response = re.sub(r'<[^>]*>', '', response).strip()
+        # --- ROBUST CLEANING FOR DEEPSEEK GARBAGE ---
+        # 1. Remove common LLM special tokens that cause syntax errors
+        clean_response = re.sub(r'<[^>]*>', '', response)
         
+        # 2. STRIP UUIDs and internal malformed markers (Critical Fix)
+        # Matches patterns like 30007612-d5b6... or :30007612...
+        clean_response = re.sub(r':?[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}', '', clean_response)
+        # Strip colon-prefixed hex strings that often appear as hallucinated parameters
+        clean_response = re.sub(r':[a-fA-F0-9]{8,}', '', clean_response)
+        
+        # 3. Extract the actual SQL from the code block
         sql_match = re.search(r'```sql\n(.*?)\n```', clean_response, re.DOTALL)
         if not sql_match:
              sql_match = re.search(r'```(.*?)```', clean_response, re.DOTALL)
         
         final_sql = sql_match.group(1) if sql_match else clean_response.strip()
-        # Final cleanup of any trailing garbage outside the last SQL block if the match failed
+        
+        # 3. Last-resort cleanup: Delete all text before "SELECT" and after the first semicolon
+        if "SELECT" in final_sql.upper():
+            start_pos = final_sql.upper().find("SELECT")
+            final_sql = final_sql[start_pos:]
+            
         if "```" in final_sql:
             final_sql = final_sql.split("```")[0].strip()
-            
-        return final_sql
+
+        # 4. Multi-query guardrail: If there are multiple queries, take only the first one
+        if ";" in final_sql:
+            # Check if there's significant content after the first semicolon
+            parts = final_sql.split(";")
+            if len(parts) > 1 and "SELECT" in parts[1].upper():
+                print("[SQL Agent] Warning: LLM returned multiple queries. Extracting the first one...")
+                final_sql = parts[0] + ";"
+
+        # 5. Auto-LIMIT: Prevent massive result sets (safety guard)
+        if final_sql and 'LIMIT' not in final_sql.upper():
+            # Strip trailing semicolon, add LIMIT, then re-add semicolon
+            final_sql = final_sql.rstrip().rstrip(';')
+            final_sql += "\nLIMIT 10;"
+            print("[SQL Agent] Auto-added LIMIT 10 (no LIMIT clause found)")
+
+        return final_sql.strip()
+
+    def _load_schema_tables(self):
+        """Fetches all table_names from the configured schema for SQL qualification."""
+        if connections._engine is None:
+            connect_database(self.vn)
+
+        try:
+            query = get_schema_query()
+            tables = pd.read_sql(query, connections._engine)["table_name"].tolist()
+            return sorted(set(tables), key=len, reverse=True)
+        except Exception as exc:
+            print(f"Warning: Unable to load schema table names: {exc}")
+            return []
+
+    def _ensure_schema_qualified(self, sql):
+        """Rewrites unqualified table names to include the schema."""
+        if not self.schema_tables:
+            return sql
+
+        schema = os.getenv("DB_SCHEMA", "public")
+        qualified_sql = sql
+
+        for table in self.schema_tables:
+            pattern = (
+                r'(?<![\w\.\"])'
+                + re.escape(table)
+                + r'(?![\w\.\"])'
+            )
+            qualified_sql = re.sub(
+                pattern,
+                f'"{schema}"."{table}"',
+                qualified_sql,
+            )
+
+        return qualified_sql
+
+    def _build_schema_map(self):
+        """Pre-load {table_name: [column_names]} for fast SQL validation."""
+        schema_map = {}
+        for table in self.schema_tables:
+            cols = self.get_table_columns(table)
+            if cols:
+                schema_map[table] = cols
+        print(f"[Schema Map] Loaded {len(schema_map)} tables for SQL pre-validation.")
+        return schema_map
+
+    def _load_relationships(self):
+        """Load FK relationships once at startup."""
+        try:
+            if connections._engine is not None:
+                rel_df = pd.read_sql(connections.get_relationships_query(), connections._engine)
+                if not rel_df.empty:
+                    return rel_df.to_string(index=False)
+        except Exception as e:
+            print(f"Warning: Could not fetch relationships: {e}")
+        return "No explicit foreign key relationships found."
+
+    def _load_samples(self):
+        """Load sample data for all tables once at startup."""
+        samples = {}
+        for table in self.schema_tables:
+            try:
+                sample_query = connections.get_data_samples_query(table, limit=3)
+                sample_df = pd.read_sql(sample_query, connections._engine)
+                samples[table] = sample_df.to_dict('records')
+            except Exception:
+                samples[table] = "No samples available."
+        print(f"[Samples Cache] Loaded samples for {len(samples)} tables.")
+        return samples
+
+    def _validate_sql(self, sql):
+        """
+        Code-level SQL pre-validator. Catches and fixes common LLM errors:
+        1. Fuzzy-match misspelled/truncated table names
+        2. Validate column references against actual schema
+        """
+        if not self.schema_map or not sql:
+            return sql
+
+        schema = os.getenv("DB_SCHEMA", "public")
+        valid_tables = list(self.schema_map.keys())
+        fixed_sql = sql
+
+        # --- Step 1: Fix misspelled/truncated table names ---
+        # Find all table-like references: schema.table or standalone table names
+        table_refs = re.findall(
+            rf'(?:"{schema}"\."|{schema}\.)([a-zA-Z_][a-zA-Z0-9_]*)',
+            fixed_sql
+        )
+        # Also find standalone table-like words after FROM/JOIN
+        standalone_refs = re.findall(
+            r'(?:FROM|JOIN)\s+(?:"?[a-zA-Z_]+"?\.)?"?([a-zA-Z_][a-zA-Z0-9_]*)"?',
+            fixed_sql,
+            re.IGNORECASE
+        )
+        all_table_refs = set(table_refs + standalone_refs)
+
+        for ref in all_table_refs:
+            ref_clean = ref.strip('"').lower()
+            if ref_clean in valid_tables or ref_clean == schema:
+                continue  # Already valid
+
+            # Fuzzy match against actual tables
+            matches = difflib.get_close_matches(ref_clean, valid_tables, n=1, cutoff=0.5)
+            if matches:
+                correct_table = matches[0]
+                print(f"[SQL Pre-Validator] Fixing table: '{ref}' → '{correct_table}'")
+                # Replace the misspelled table name (handle both quoted and unquoted)
+                fixed_sql = re.sub(
+                    rf'(?<![a-zA-Z_]){re.escape(ref)}(?![a-zA-Z_])',
+                    correct_table,
+                    fixed_sql
+                )
+
+        # --- Step 2: Validate column references (alias.column or table.column) ---
+        # Build alias map from the SQL: alias -> table_name
+        alias_map = {}
+        alias_pattern = re.findall(
+            r'(?:FROM|JOIN)\s+(?:"?[a-zA-Z_]+"?\.)?"?([a-zA-Z_][a-zA-Z0-9_]*)"?\s+(?:AS\s+)?([a-zA-Z_]\w*)',
+            fixed_sql,
+            re.IGNORECASE
+        )
+        for table_ref, alias in alias_pattern:
+            table_clean = table_ref.strip('"').lower()
+            alias_clean = alias.strip('"').lower()
+            # Skip SQL keywords that look like aliases
+            if alias_clean in ('on', 'where', 'group', 'order', 'limit', 'having', 'and', 'or', 'as', 'join', 'inner', 'left', 'right', 'full'):
+                continue
+            if table_clean in self.schema_map:
+                alias_map[alias_clean] = table_clean
+
+        # Find all alias.column or table.column references
+        col_refs = re.findall(r'([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)', fixed_sql)
+        for qualifier, column in col_refs:
+            q_lower = qualifier.strip('"').lower()
+            c_lower = column.strip('"').lower()
+
+            # Skip schema qualifiers (e.g., postgres_air.table)
+            if q_lower == schema:
+                continue
+
+            # Resolve alias to actual table name
+            actual_table = alias_map.get(q_lower, q_lower)
+
+            if actual_table not in self.schema_map:
+                continue  # Can't validate unknown tables
+
+            valid_columns = self.schema_map[actual_table]
+            valid_columns_lower = [c.lower() for c in valid_columns]
+
+            if c_lower not in valid_columns_lower:
+                # Try fuzzy match
+                matches = difflib.get_close_matches(c_lower, valid_columns_lower, n=1, cutoff=0.6)
+                if matches:
+                    correct_col = valid_columns[valid_columns_lower.index(matches[0])]
+                    print(f"[SQL Pre-Validator] Fixing column: '{qualifier}.{column}' → '{qualifier}.{correct_col}'")
+                    fixed_sql = fixed_sql.replace(
+                        f"{qualifier}.{column}",
+                        f"{qualifier}.{correct_col}"
+                    )
+                else:
+                    print(f"[SQL Pre-Validator] Warning: Column '{qualifier}.{column}' not found in '{actual_table}'. Valid: {valid_columns}")
+
+        return fixed_sql
 
     def validator_agent(self, question, sql):
         """
@@ -148,8 +439,9 @@ class AgenticSQLPipeline:
         # 1. Syntax & Safety Check
         forbidden = ["drop", "delete", "update", "insert", "truncate"]
         if any(cmd in sql.lower() for cmd in forbidden):
-            return None, "Blocked: Forbidden SQL command detected."
+            return None, "Blocked: Forbidden SQL command detected.", False
 
+        trained = False
         try:
             # 2. Execution Check
             results = self.vn.run_sql(sql)
@@ -158,41 +450,100 @@ class AgenticSQLPipeline:
             if results is not None and not results.empty:
                 print("[Self-Learning] Query successful. Auto-training Vanna store...")
                 self.vn.train(question=question, sql=sql)
+                trained = True
             
-            return results, None
+            return results, None, trained
         except Exception as e:
             # If it fails, we could potentially prompt the SQL agent to fix it (Self-Correction)
-            return None, f"SQL Error: {str(e)}"
+            error_msg = str(e)
+            self.vn.log_failure(question, sql, error_msg)
+            return None, f"SQL Error: {error_msg}", False
 
     def run(self, question):
         """
         Runs the full 4-Agent pipeline (Classifier -> Planner -> SQL -> Validator) with integrated caching.
         """
+        latencies = {}
+        start_time = time.time()
+
         # --- PHASE 0: Check Caching (via ChromaDB) ---
-        print("[Cache Check] Searching for existing solutions...")
+        p0_start = time.time()
+        self.log_stage("Phase 0 - Cache", "Searching for a cached solution")
         cached_sql, cached_results = self.vn.get_cached_query(question)
+        latencies["cache_check"] = time.time() - p0_start
+
         if cached_results is not None:
-             print("[Fast Path] Returning cached results.")
-             return cached_results
+            self.log_stage("Phase 0 - Cache", "Cache hit", "Returning cached results without re-running agents")
+            return cached_results
 
         # --- PHASE 1: Classification ---
+        p1_start = time.time()
         category = self.classifier_agent(question)
+        latencies["classification"] = time.time() - p1_start
+        self.log_stage("Phase 1 - Classification", "Completed", f"Category={category}")
 
         # --- PHASE 2: Planning ---
+        p2_start = time.time()
         plan = self.planner_agent(question, category)
+        latencies["planning"] = time.time() - p2_start
+        self.log_stage("Phase 2 - Planning", "Plan drafted", "Plan text stored for SQL agent")
         
         # --- PHASE 3: SQL Generation ---
+        p3_start = time.time()
         sql = self.sql_agent(question, plan)
+        sql = self._ensure_schema_qualified(sql)
+        # Pre-validate SQL against actual schema (fuzzy fix tables/columns)
+        sql = self._validate_sql(sql)
+        latencies["sql_generation"] = time.time() - p3_start
+        self.log_stage("Phase 3 - SQL Generation", "SQL created", f"{sql.splitlines()[0] if sql else 'no SQL'}...")
         
-        # --- PHASE 4: Validation ---
-        results, error = self.validator_agent(question, sql)
+        # --- PHASE 4: Validation & Potential Self-Correction ---
+        p4_start = time.time()
+        results, error, trained = self.validator_agent(question, sql)
         
+        # Self-Correction Loop (One retry)
+        if error and "SQL Error" in error:
+            self.log_stage("Phase 4 - Validation", "Failed attempt, triggering self-correction", error)
+            
+            # Re-run Phase 3 with error context
+            p3_retry_start = time.time()
+            sql = self.sql_agent(question, plan, previous_sql=sql, error_message=error)
+            sql = self._ensure_schema_qualified(sql)
+            sql = self._validate_sql(sql)
+            latencies["sql_generation_retry"] = time.time() - p3_retry_start
+            
+            # Re-run Phase 4
+            results, error, trained = self.validator_agent(question, sql)
+        
+        latencies["validation"] = time.time() - p4_start
+
+        if trained:
+            self.log_stage("Phase 4 - Validation", "Self-learning triggered", "Stored new QA pair in Vanna cache")
+
+        total_latency = time.time() - start_time
+        latencies["total"] = total_latency
+
+        # Save Metrics
+        metrics = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "question": question,
+            "category": category,
+            "sql": sql,
+            "success": results is not None,
+            "error": error,
+            "latencies": latencies
+        }
+        with open("metrics.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(metrics) + "\n")
+
         if error:
-            print(f"Pipeline Failed: {error}")
+            self.log_stage("Phase 4 - Validation", "Failed", error)
             return None
-        
-        print(f"\nFinal SQL: {sql} \n")
-        print(f"Query executed successfully. Returning results...")
+
+        self.log_stage("Phase 4 - Validation", "Success", f"SQL executed in {total_latency:.2f}s")
+
+        print(f"\nFinal SQL:\n{sql}\n")
+        print("Query executed successfully. Returning results...")
         return results
 
 if __name__ == "__main__":
