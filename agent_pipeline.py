@@ -669,10 +669,11 @@ class AgenticSQLPipeline_V2:
         2. NO HALLUCINATION: Do not assume columns exist.
         3. STRICT NO-FILTER RULE: DO NOT add WHERE clauses with specific values unless explicitly provided in the 'Question'.
         4. RELEVANCY CHECK: Ignore 'STRUCTURAL EXAMPLES' that are not related to the current Question.
-        5. PARSIMONY RULE: Use the ABSOLUTE MINIMUM number of tables. If a Question can be answered from a SINGLE table (e.g., 'How many flights?', 'List airports'), DO NOT JOIN anything else. Joining when not required is a failure.
+        5. PARSIMONY RULE: Use the ABSOLUTE MINIMUM number of tables. If a Question can be answered from a SINGLE table (e.g., 'How many passengers per account?'), DO NOT JOIN anything else. Joining 'phone' or 'boarding_pass' for passenger counts is a failure.
         6. JOIN ENFORCEMENT: Every table in TABLES must have a JOIN_LOGIC entry.
         7. IDENTIFIER GUIDE:
            - ONLY use joins if the Question requires data from different domains.
+           - To count passengers per account: 'passenger' table already has 'account_id'. NO JOIN NEEDED.
            - Linking FLIGHT and PASSENGER: flight -> booking_leg -> passenger.
            - Arrival vs Departure: 'arrivals' maps to arrival_airport, 'departures' maps to departure_airport.
         
@@ -724,7 +725,8 @@ class AgenticSQLPipeline_V2:
         Task: Write a single, valid standard SQL query.
         - Use schema format: "{os.getenv('DB_SCHEMA', 'public')}"."table_name"
         - DO NOT USE CTEs (WITH clauses).
-        - ALIAS CONSISTENCY: Every alias used (e.g., 'p', 'b') MUST be defined in the FROM or JOIN clause (e.g., FROM table AS p).
+        - ALIAS CONSISTENCY: Every alias used MUST be defined in the FROM or JOIN clause.
+        - UNIQUE ALIASES: DO NOT use the same alias (e.g., 'p') for two different tables. Every table MUST have a unique alias.
         - STRICT NO-FILTER HALLUCINATION: Do not add any WHERE filters for strings or dates (like 'John', '2023-01-01') that are NOT in the 'Original Question'.
         - Follow the JOIN_LOGIC in the Plan strictly.
         - ONLY return SQL code.
@@ -911,8 +913,7 @@ class AgenticSQLPipeline_V2:
                 print(f"[SQL Pre-Validator] Fixing table: '{ref}' → '{correct_table}'")
                 fixed_sql = re.sub(rf'(?<![a-zA-Z_]){re.escape(ref)}(?![a-zA-Z_])', correct_table, fixed_sql)
 
-        # Build table -> alias and alias -> table maps
-        table_to_alias = {}
+        # Build table -> alias and alias -> table maps (Catching duplicates)
         alias_to_table = {}
         alias_pattern = re.findall(
             r'(?:FROM|JOIN)\s+(?:"?[a-zA-Z_]\w*"?\.)?"?([a-zA-Z_]\w*)"?\s+(?:AS\s+)?([a-zA-Z_]\w*)',
@@ -924,8 +925,16 @@ class AgenticSQLPipeline_V2:
             alias_clean = alias.strip('"').lower()
             if alias_clean in ('on', 'where', 'group', 'order', 'limit', 'having', 'and', 'or', 'as', 'join', 'inner', 'left', 'right', 'full'):
                 continue
+            
+            # DETECT DUPLICATE ALIASES: If 'p' is already used for 'phone', and now 'passenger' wants 'p'
+            if alias_clean in alias_to_table and alias_to_table[alias_clean] != table_clean:
+                new_alias = f"{alias_clean}2"
+                print(f"[SQL Pre-Validator] Duplicate Alias Conflict: Renaming '{table_clean}' alias '{alias_clean}' → '{new_alias}'")
+                # Sophisticated replacement for the definition only
+                fixed_sql = re.sub(rf'\b{re.escape(alias_clean)}\b(?=\s+ON\b|\s+JOIN\b|\s+WHERE\b|\s+GROUP\b)', new_alias, fixed_sql, count=1, flags=re.IGNORECASE)
+                alias_clean = new_alias
+
             if table_clean in self.schema_map:
-                table_to_alias[table_clean] = alias
                 alias_to_table[alias_clean] = table_clean
 
         # --- Step 2: Validate column references (qualifier.column) ---
@@ -933,40 +942,30 @@ class AgenticSQLPipeline_V2:
         for qualifier, column in col_refs:
             q_lower = qualifier.strip('"').lower()
             c_lower = column.strip('"').lower()
+            if q_lower == schema: continue
 
-            if q_lower == schema:
-                continue
+            # Resolve qualifier (now likely an alias) to table
+            actual_table = alias_to_table.get(q_lower, q_lower)
 
-            # Case A: Qualifier is a table name that HAS an alias
-            if q_lower in table_to_alias:
-                correct_alias = table_to_alias[q_lower]
-                print(f"[SQL Pre-Validator] Alias Mismatch: Replacing table name '{qualifier}' with alias '{correct_alias}'")
-                fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{correct_alias}.{column}")
-                q_lower = correct_alias.lower() # Continue with the alias for column validation
+            if actual_table not in self.schema_map:
+                # Fuzzy matching hallucinated aliases
+                alias_matches = difflib.get_close_matches(q_lower, list(alias_to_table.keys()), n=1, cutoff=0.7)
+                if alias_matches:
+                    q_lower = alias_matches[0]
+                    actual_table = alias_to_table[q_lower]
+                    print(f"[SQL Pre-Validator] Hallucinated Alias: Fixing '{qualifier}' → '{q_lower}'")
+                    fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{q_lower}.{column}")
 
-        # Resolve qualifier (now likely an alias) to table
-        actual_table = alias_to_table.get(q_lower, q_lower)
+            if actual_table in self.schema_map:
+                valid_columns = self.schema_map[actual_table]
+                valid_columns_lower = [c.lower() for c in valid_columns]
 
-        if actual_table not in self.schema_map:
-            # NEW: If the qualifier is NOT a known table or defined alias,
-            # try fuzzy matching it against DEFINED ALIASES.
-            alias_matches = difflib.get_close_matches(q_lower, list(alias_to_table.keys()), n=1, cutoff=0.7)
-            if alias_matches:
-                q_lower = alias_matches[0]
-                actual_table = alias_to_table[q_lower]
-                print(f"[SQL Pre-Validator] Hallucinated Alias: Fixing '{qualifier}' → '{q_lower}'")
-                fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{q_lower}.{column}")
-
-        if actual_table in self.schema_map:
-            valid_columns = self.schema_map[actual_table]
-            valid_columns_lower = [c.lower() for c in valid_columns]
-
-            if c_lower not in valid_columns_lower:
-                matches = difflib.get_close_matches(c_lower, valid_columns_lower, n=1, cutoff=0.6)
-                if matches:
-                    correct_col = valid_columns[valid_columns_lower.index(matches[0])]
-                    print(f"[SQL Pre-Validator] Fixing column: '{qualifier}.{column}' → '{qualifier}.{correct_col}'")
-                    fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{qualifier}.{correct_col}")
+                if c_lower not in valid_columns_lower:
+                    matches = difflib.get_close_matches(c_lower, valid_columns_lower, n=1, cutoff=0.6)
+                    if matches:
+                        correct_col = valid_columns[valid_columns_lower.index(matches[0])]
+                        print(f"[SQL Pre-Validator] Fixing column: '{qualifier}.{column}' → '{qualifier}.{correct_col}'")
+                        fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{qualifier}.{correct_col}")
         
         return fixed_sql
 
