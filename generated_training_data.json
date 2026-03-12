@@ -205,5 +205,58 @@
                 "avg": 7600.0
             }
         ]
+    },
+    {
+        "question": "How many passengers are there?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.passenger",
+        "sample_results": [
+            {
+                "count": 21140719
+            }
+        ]
+    },
+    {
+        "question": "How many frequent flyer accounts do we have?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.frequent_flyer",
+        "sample_results": [
+            {
+                "count": 128346
+            }
+        ]
+    },
+    {
+        "question": "How many flights are scheduled yet?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.flight WHERE status = 'scheduled'",
+        "sample_results": [
+            {
+                "count": 0
+            }
+        ]
+    },
+    {
+        "question": "Who are the frequent flyers with more than one award point?",
+        "sql": "SELECT first_name, last_name FROM postgres_air.frequent_flyer WHERE award_points > 1",
+        "sample_results": [
+            {
+                "first_name": "EVA",
+                "last_name": "AMOS"
+            },
+            {
+                "first_name": "KAI",
+                "last_name": "HYDE"
+            },
+            {
+                "first_name": "GAEL",
+                "last_name": "JAN"
+            },
+            {
+                "first_name": "TROY",
+                "last_name": "JOY"
+            },
+            {
+                "first_name": "IAN",
+                "last_name": "CARR"
+            }
+        ]
     }
 ]
