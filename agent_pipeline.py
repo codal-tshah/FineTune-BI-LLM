@@ -652,18 +652,34 @@ class AgenticSQLPipeline_V2:
                     if t in all_tables:
                         target_tables.add(t)
 
-       
- # D. Domain Purge: If question is about airports but NOT about flights, 
-        # remove 'flight' and 'booking_leg' to prevent context leakage.
+        # D. Dynamic Protection & Domain Purge
+        # Identify "Noise" tables that are frequently hallucinated in unrelated domains
+        noise_candidates = {"flight", "booking_leg", "boarding_pass", "booking", "aircraft"}
+        
+        # SMART PROTECTION: Cross-reference question keywords with schema columns
+        protected_tables = set()
+        question_words = set(re.findall(r'\w+', question.lower()))
+        for t in target_tables:
+            if t in self.schema_map:
+                cols_str = " ".join(self.schema_map[t]).lower()
+                # 1. Direct Column Match: If question mentions a column name, protect the table
+                if any(word in cols_str for word in question_words if len(word) > 3):
+                    protected_tables.add(t)
+                # 2. Semantic Travel-Math: Protect distance/time tables for relevant questions
+                math_keywords = ["mile", "distance", "velocity", "duration", "time", "speed", "length"]
+                if any(kw in cols_str and kw in question.lower() for kw in math_keywords):
+                    protected_tables.add(t)
+
+        # Domain Purge: If question is about airports but NOT about flight mechanics/travel
         if "airport" in question.lower() and not any(w in question.lower() for w in ["flight", "scheduled", "depart", "arrive"]):
             for t in ["flight", "booking_leg", "boarding_pass", "booking"]:
-                if t in target_tables:
+                if t in target_tables and t not in protected_tables:
                     target_tables.remove(t)
                     
-        # E. Domain Purge: If question is about account/frequent_flyer, remove flight noise.
+        # Domain Purge: If question is about account/passenger, remove flight noise if not travel-math
         if any(w in question.lower() for w in ["account", "passenger", "frequent_flyer"]) and "flight" not in question.lower():
              for t in ["flight", "aircraft", "airport"]:
-                if t in target_tables:
+                if t in target_tables and t not in protected_tables:
                     target_tables.remove(t)
         # Fallback if still empty (use primary tables)
         if not target_tables:
