@@ -6,10 +6,10 @@ A production-ready Business Intelligence toolkit that turns natural language int
 
 - **Tiered Multi-Model Orchestration (V2)**: Uses a fast 3B model (Architect) for planning and a powerful 6.7B model (SQL Engineer) for generation.
 - **Smart Table Protection**: Dynamic pruning logic that cross-references queries against schema metrics (e.g., protects `flight` for "miles" or "velocity" queries even if "flight" isn't mentioned).
-- **SQL Pre-Validation (V2)**: Fuzzy-matches identifiers, enforces alias consistency, and now automatically strips illegal schema-qualified aliases (e.g., `AS "schema"."table"`).
+- **Off-Topic Guard**: Semantic filter that rejects greetings or random chat, providing a helpful summary of what the assistant *can* answer instead of failing.
+- **SQL Pre-Validation (V3)**: Now includes **Hex Healing** to fix internal LLM junk (e.g., `flight67e..._id` -> `flight_id`) and repairs broken join syntax (`f. = bl.`).
+- **Human-Readable Results**: Optimized SELECT logic that prioritizes descriptive columns (names, titles, models) over raw IDs.
 - **PgAdmin-Ready Output**: Displays raw SQL in markdown blocks for easy copy-pasting and automatically exports current results to `latest_query.sql`.
-- **Character Normalization**: Automatically fixes full-width character hallucinations (e.g., replacement of `＝` with `=`) frequently seen in some models.
-- **Dynamic Schema Pruning**: The SQL Agent ONLY receives the schema for tables selected by the Architect, minimizing hallucination surface area.
 - **Smart Context Relevancy**: Architect ignores irrelevant structural examples from ChromaDB to prevent "cross-pollination" errors.
 - **Poisoned Cache Bypass**: Support for `run(question, use_cache=False)` to force re-generation when semantic cache contains bad data.
 - **Automated Self-Correction**: Validator catches SQL errors and feeds them back to the SQL Agent for targeted retries.
@@ -102,7 +102,7 @@ python train.py
 python synthetic_training_generator.py
 ```
 
-Generates additional validated NL/SQL pairs to improve the planner.
+Generates additional validated NL/SQL pairs using **multi-threaded execution** (4x faster) to improve the planner's knowledge base.
 
 ### 6. Run the app
 

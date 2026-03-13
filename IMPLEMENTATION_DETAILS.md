@@ -209,3 +209,38 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 1. **6.7B Accuracy**: Hallucinations on complex queries still occur; SQL Pre-Validator and Schema Pruning catch ~90%.
 2. **PostgreSQL focus**: MySQL/SQLite support exists but is secondary.
 3. **No multi-turn context**: Each question is treated as a new session.
+## 25. Off-Topic Rejection Guard
+
+- **Problem**: Small models often try to "force" a SQL query for general conversation (e.g., "hi", "how are you"), leading to hallucinated queries on random tables.
+- **Solution**: Implemented a semantic guard layer in `agent_pipeline.py` using `_is_off_topic()`:
+  - The Architect model performs a fast binary check against the schema summary.
+  - If a question is identified as `OFF_TOPIC`, the pipeline halts and returns a helpful rejection message listing the database's actual capabilities.
+
+## 26. Hex Healing & Corruption Recovery (Pre-Validator V3)
+
+- **Problem**: Quantized models occasionally inject internal memory hex blocks into column names (e.g., `flight67e1a0f5_id` instead of `flight_id`). Simple stripping often left "hanging dots" (`f. = bl.`), causing syntax errors.
+- **Solution**:
+  - **Heal Pass**: Scans for identifiers with long hex strings (12+ chars) and "heals" them by removing the hex part while preserving the base word/underscore structure.
+  - **Syntax Repair**: Added regex pass to detect and fix broken join syntax like `f. = bl.` by either guessing the primary key prefix or removing the trailing dot before operators.
+
+## 27. Human-Readability Enforcement
+
+- **Problem**: The **Parsimony Rule** (use minimum tables) often resulted in queries returning only IDs (e.g., `account_id`) because joining the `account` table for `first_name` was technically "unnecessary" for the count math.
+- **Solution**:
+  - **Architect Rule #9**: Instructs the planner to mandatory include descriptive columns (names, titles, models) in the plan when listing or grouping entities.
+  - **SQL Engineer Mandate**: Added a high-level instruction that results with only IDs are considered poor quality, forcing the model to perform the descriptive joins.
+
+## 28. Strategic Fallback
+
+- **Problem**: Blindly falling back to "primary tables" when no keywords matched often led to hallucinations for off-topic questions.
+- **Solution**: The Architect now only triggers the primary table fallback if the question is first confirmed as `AUTHORIZED` (relevant to DB) but has hazy keyword matching.
+
+## 29. Multi-threaded Synthetic Data Generation
+
+- **Problem**: Generating 100+ training examples was slow due to sequential LLM calls.
+- **Solution**: Updated `synthetic_training_generator.py` to use `ThreadPoolExecutor` with 4 workers. This allows multiple batches to be processed in parallel, reducing the total generation time by ~70%.
+
+## 30. Resilient Semantic Cache & Pipeline
+
+- **Problem**: Null results or string-type leakage from ChromaDB/Ollama caused `NoneType` and `AttributeError` crashes in the pipeline.
+- **Solution**: Added robust type-checking in `connections.py` (for `best_match`) and `agent_pipeline.py` (for `training_data` items) to skip malformed entries instead of crashing.
