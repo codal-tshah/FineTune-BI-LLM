@@ -616,6 +616,8 @@ class AgenticSQLPipeline_V2:
             matched_keywords = [w for w in core_keywords if w in question_lower]
             
             for item in training_data:
+                if not isinstance(item, dict):
+                    continue
                 q_example = item.get('question', '').lower()
                 # STRENGTHENED RELEVANCY CHECK:
                 # The example must share AT LEAST TWO keywords from the question + matched core keywords
@@ -689,9 +691,13 @@ class AgenticSQLPipeline_V2:
              for t in ["flight", "aircraft", "airport"]:
                 if t in target_tables and t not in protected_tables:
                     target_tables.remove(t)
-        # Fallback if still empty (use primary tables)
+        # Strategic Fallback: If no tables matched via keywords, check if it's even relevant
         if not target_tables:
-            primary_tables = ["flight", "booking", "passenger", "airport", "account"]
+            if self._is_off_topic(question):
+                return "OFF_TOPIC"
+            
+            # If not off-topic but hazy, use primary tables as a starting point
+            primary_tables = ["flight", "airport", "account", "phone", "boarding_pass", "booking_leg", "aircraft", "booking", "passenger"]
             target_tables = set(t for t in primary_tables if t in all_tables)
 
         # 2. Build Table Context
@@ -722,6 +728,8 @@ class AgenticSQLPipeline_V2:
            - Linking FLIGHT and BOARDING_PASS: flight -> booking_leg -> boarding_pass.
            - Arrival vs Departure: 'arrivals' maps to arrival_airport, 'departures' maps to departure_airport.
         
+        9. HUMAN-READABILITY RULE: When a user asks to "list", "show", or group by an entity (e.g., passenger, aircraft, airport, etc..), you MUST include descriptive columns in your plan (e.g., first_name, last_name, airport_name, model) instead of just IDs.
+        
         Output Format:
         CATEGORY: [FLIGHT|BOOKING|PASSENGER|AIRPORT|MISC]
         TABLES: [table1, table2, table3]
@@ -734,6 +742,23 @@ class AgenticSQLPipeline_V2:
         """
         response = self.vn.submit_prompt_with_model([{"role": "user", "content": prompt}], model=self.models["architect"])
         return response
+
+    def _is_off_topic(self, question):
+        """Checks if the question is related to the DB schema or is just general chat/noise."""
+        schema_summary = ", ".join(self.schema_tables[:10]) + "..."
+        prompt = f"""
+        You are a Database Assistant Guard.
+        SCHEMA CONTEXT: {schema_summary} (Airports, Flights, Passengers, Bookings, Aircraft).
+        USER QUESTION: "{question}"
+
+        TASK: Is this question related to the data in our database?
+        - If it's a greeting (hi, hello), general conversation, or a topic completely unrelated to aviation/passengers/bookings, return "OFF_TOPIC".
+        - If it's a question that *could* be answered by SQL (even if it's vague), return "AUTHORIZED".
+
+        OUTPUT: Return only "OFF_TOPIC" or "AUTHORIZED".
+        """
+        response = self.vn.submit_prompt_with_model([{"role": "user", "content": prompt}], model=self.models["architect"])
+        return "OFF_TOPIC" in response.upper()
 
     def sql_agent(self, question, plan, previous_sql=None, error_message=None):
         """
@@ -779,6 +804,7 @@ class AgenticSQLPipeline_V2:
         - UNIQUE ALIASES: DO NOT use the same alias (e.g., 'p') for two different tables. Every table MUST have a unique alias.
         - STRICT NO-FILTER HALLUCINATION: Do not add any WHERE filters for strings or dates (like 'John', '2023-01-01') that are NOT in the 'Original Question'.
         - Follow the JOIN_LOGIC in the Plan strictly.
+        - HUMAN-READABLE OUTPUT: If the question asks to "list", "show", or group by an entity (like passengers, airports, or aircraft), always select their descriptive columns (e.g., first_name, last_name, airport_name, model) along with any IDs. Results with only IDs are considered poor quality.
         - ONLY return SQL code.
         """
         response = self.vn.submit_prompt_with_model([{"role": "user", "content": prompt}], model=self.models["sql"])
@@ -850,6 +876,20 @@ class AgenticSQLPipeline_V2:
         # --- Phase 1: Architect (3B) ---
         p1_start = time.time()
         plan = self.architect_agent(question)
+        
+        # OFF-TOPIC GUARD
+        if "OFF_TOPIC" in plan.upper():
+            print("\n" + "!"*50)
+            print("🚫 OFF-TOPIC QUERY REJECTED")
+            print("!"*50)
+            print(f"Question: {question}")
+            print("-" * 50)
+            print("I can only answer questions related to the 'Postgres Air' database.")
+            print("This includes data about: Flights, Passengers, Bookings, Accounts, and Aircraft.")
+            print("Please ask a valid data-related question.")
+            print("!"*50 + "\n")
+            return None
+
         latencies["architect"] = time.time() - p1_start
         self.log_stage("Phase 1 - Architect", "Strategy designed")
 
