@@ -617,10 +617,17 @@ class AgenticSQLPipeline_V2:
             
             for item in training_data:
                 q_example = item.get('question', '').lower()
-                # If question has specific keywords, the example MUST have at least one of them to be valid context
-                if matched_keywords:
-                    if not any(w in q_example for w in matched_keywords):
-                        continue # Skip irrelevant example (e.g., flight example for an airport question)
+                # STRENGTHENED RELEVANCY CHECK:
+                # The example must share AT LEAST TWO keywords from the question + matched core keywords
+                matched_count = sum(1 for w in matched_keywords if w in q_example)
+                
+                # If specific technical terms exist (miles, boarding_pass), the example MUST share them
+                tech_terms = ["mile", "boarding_pass", "velocity", "range", "seat", "checkin", "delay"]
+                active_tech = [t for t in tech_terms if t in question_lower]
+                tech_match = all(t in q_example for t in active_tech) if active_tech else True
+                
+                if matched_count < 1 or not tech_match:
+                    continue 
                 
                 valid_examples.append(item)
                 # Also extract tables from these relevant examples
@@ -637,14 +644,15 @@ class AgenticSQLPipeline_V2:
                     context_parts.append(f"Q: {item.get('question', 'N/A')}\nSQL: {s_masked}")
                 clean_context = "\n---\n".join(context_parts)
 
-        # C. Domain-Driven Expansion (Ensures bridges like booking_leg are included)
+        # C. Domain-Driven Expansion
         domain_keywords = {
-            "flight": ["flight", "aircraft", "airport", "booking_leg"],
+            "flight": ["flight", "booking_leg"], # removed aircraft as it was causing count hallucinations
             "departure": ["flight", "airport"],
             "arrival": ["flight", "airport"],
-            "booking": ["booking", "booking_leg", "passenger", "boarding_pass"],
+            "booking": ["booking", "booking_leg", "boarding_pass"],
             "passenger": ["passenger", "account", "frequent_flyer", "booking_leg"],
-            "airport": ["airport"]
+            "airport": ["airport"],
+            "aircraft": ["aircraft", "flight"]
         }
         for domain, tables in domain_keywords.items():
             if domain in question.lower():
@@ -706,12 +714,12 @@ class AgenticSQLPipeline_V2:
         2. NO HALLUCINATION: Do not assume columns exist.
         3. STRICT NO-FILTER RULE: DO NOT add WHERE clauses with specific values unless explicitly provided in the 'Question'.
         4. RELEVANCY CHECK: Ignore 'STRUCTURAL EXAMPLES' that are not related to the current Question.
-        5. PARSIMONY RULE: Use the ABSOLUTE MINIMUM number of tables. If a Question can be answered from a SINGLE table (e.g., 'How many passengers per account?'), DO NOT JOIN anything else. Joining 'phone' or 'boarding_pass' for passenger counts is a failure.
-        6. JOIN ENFORCEMENT: Every table in TABLES must have a JOIN_LOGIC entry.
-        7. IDENTIFIER GUIDE:
-           - ONLY use joins if the Question requires data from different domains.
-           - To count passengers per account: 'passenger' table already has 'account_id'. NO JOIN NEEDED.
+        5. PARSIMONY RULE: Use the ABSOLUTE MINIMUM number of tables. 
+        6. EXPLICIT OVERRIDE: If the user mentions a specific table or metric in brackets (e.g., 'via boarding_pass'), YOU MUST use that table in your PLAN and TABLES list. Failure to do so is a critical error.
+        7. JOIN ENFORCEMENT: Every table in TABLES must have a JOIN_LOGIC entry.
+        8. IDENTIFIER GUIDE:
            - Linking FLIGHT and PASSENGER: flight -> booking_leg -> passenger.
+           - Linking FLIGHT and BOARDING_PASS: flight -> booking_leg -> boarding_pass.
            - Arrival vs Departure: 'arrivals' maps to arrival_airport, 'departures' maps to departure_airport.
         
         Output Format:
@@ -740,9 +748,10 @@ class AgenticSQLPipeline_V2:
 
         # Dynamic Schema Pruning
         plan_tables = []
-        table_section = re.search(r'TABLES:\s*\[?([\w\s,]+)\]?', plan, re.IGNORECASE)
+        # Support both "TABLES: [t1, t2]" and "TABLES: t1, t2" formats
+        table_section = re.search(r'TABLES:\s*(?:\[)?([\w\s,]+)(?:\])?', plan, re.IGNORECASE)
         if table_section:
-            plan_tables = [t.strip().lower() for t in table_section.group(1).split(',')]
+            plan_tables = [t.strip().lower() for t in table_section.group(1).replace('[','').replace(']','').split(',')]
         
         schema_ref = ""
         tables_found = 0
@@ -774,11 +783,9 @@ class AgenticSQLPipeline_V2:
         """
         response = self.vn.submit_prompt_with_model([{"role": "user", "content": prompt}], model=self.models["sql"])
         
-        # --- ROBUST CLEANING (From original logic) ---
+        # --- ROBUST CLEANING ---
         sql = re.sub(r'<[^>]*>', '', response) # Remove thinking tokens
-        # Strip UUIDs and internal hex markers
-        sql = re.sub(r':?[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}', '', sql)
-        sql = re.sub(r':[a-fA-F0-9]{8,}', '', sql)
+        # Note: Heavy hex stripping (UUIDs) moved to _validate_sql for safer context-aware cleaning.
         
         sql_match = re.search(r'```sql\n(.*?)\n```', sql, re.DOTALL | re.IGNORECASE)
         if not sql_match: sql_match = re.search(r'```(.*?)```', sql, re.DOTALL)
@@ -969,6 +976,28 @@ class AgenticSQLPipeline_V2:
         schema = os.getenv("DB_SCHEMA", "public")
         valid_tables = list(self.schema_map.keys())
         fixed_sql = sql
+
+        # --- PRE-STEP: Heal Hex Corruption & Gibberish ---
+        # Detect and strip hex junk mashups like "flight67e1a0f5_id" -> "flight_id"
+        # and stand-alone long hex strings from token leakage
+        gibberish_pattern = r'[a-fA-F0-9]{12,}'
+        words = re.findall(r'\b\w+\b', fixed_sql)
+        for word in words:
+            if re.search(gibberish_pattern, word):
+                # If it's a mix of hex and text, strip the hex part
+                if re.search(r'[g-zG-Z_]', word):
+                    clean_word = re.sub(gibberish_pattern, '', word)
+                    # Handle the case where stripping hex leaves double underscores or a trailing underscore
+                    clean_word = re.sub(r'_{2,}', '_', clean_word).strip('_')
+                    if clean_word and clean_word != word:
+                        fixed_sql = re.sub(rf'\b{word}\b', clean_word, fixed_sql)
+                # If it's strictly a long hex, it's likely token leakage; delete it (risky, but better than syntax error)
+                elif len(word) >= 30:
+                    fixed_sql = re.sub(rf'\b{word}\b', '', fixed_sql)
+
+        # Final safety: strip any hanging dots (e.g. "f. = bl.") caused by the above or LLM error
+        fixed_sql = re.sub(r'\b([a-zA-Z_]\w*)\.\s*([=<>])', r'\1_id \2', fixed_sql) # Try to guess common missing PKs
+        fixed_sql = re.sub(r'([a-zA-Z_]\w*)\.\s+(?=[^a-zA-Z_])', r'\1', fixed_sql) # Remove trailing dot before operator
 
         # --- Step 1: Fix misspelled/truncated table names ---
         table_refs = re.findall(rf'(?:"{schema}"\."|{schema}\.)([a-zA-Z_]\w*)', fixed_sql)
