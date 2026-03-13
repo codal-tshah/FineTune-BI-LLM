@@ -5,7 +5,10 @@ A production-ready Business Intelligence toolkit that turns natural language int
 ## 🎯 Key Features
 
 - **Tiered Multi-Model Orchestration (V2)**: Uses a fast 3B model (Architect) for planning and a powerful 6.7B model (SQL Engineer) for generation.
-- **SQL Pre-Validation Layer**: Code-level validator that fuzzy-matches table names, enforces alias consistency (e.g., `f.id` → `flight.id`), and auto-fixes hallucinated aliases.
+- **Smart Table Protection**: Dynamic pruning logic that cross-references queries against schema metrics (e.g., protects `flight` for "miles" or "velocity" queries even if "flight" isn't mentioned).
+- **SQL Pre-Validation (V2)**: Fuzzy-matches identifiers, enforces alias consistency, and now automatically strips illegal schema-qualified aliases (e.g., `AS "schema"."table"`).
+- **PgAdmin-Ready Output**: Displays raw SQL in markdown blocks for easy copy-pasting and automatically exports current results to `latest_query.sql`.
+- **Character Normalization**: Automatically fixes full-width character hallucinations (e.g., replacement of `＝` with `=`) frequently seen in some models.
 - **Dynamic Schema Pruning**: The SQL Agent ONLY receives the schema for tables selected by the Architect, minimizing hallucination surface area.
 - **Smart Context Relevancy**: Architect ignores irrelevant structural examples from ChromaDB to prevent "cross-pollination" errors.
 - **Poisoned Cache Bypass**: Support for `run(question, use_cache=False)` to force re-generation when semantic cache contains bad data.
@@ -46,7 +49,7 @@ graph TD
 | `agent_pipeline.py` | Core 4-agent pipeline (Classifier, Planner, SQL, Validator) |
 | `connections.py` | Vanna/DB setup, connection pooling, and **Semantic Normalization Caching** |
 | `train.py` | Schema ingestion + vector-store training |
-| `synthetic_training_generator.py` | Generates 20–50 synthetic NL/SQL pairs for ChromaDB |
+| `synthetic_training_generator.py` | Generates 100+ synthetic NL/SQL pairs using batch complex logic |
 | `requirements.txt` | Python dependencies |
 | `.env` | Configuration (DB credentials, LLM model, vector store path) |
 | `vanna_storage/` | Local ChromaDB embeddings |
@@ -130,18 +133,11 @@ Type `exit` or `quit` to stop.
 - `-t / --test`: Run the built-in test question list.
 - `VANNA_SHOW_PROMPTS=1`: Run this when you *need* to see the Ollama prompts/response dumps for debugging (hidden otherwise).
 
-## 🧪 Synthetic Training Generator
-
-`synthetic_training_generator.py` is **optional but recommended**:
-
-| Scenario | Use synthetic generator? | Why |
-|----------|--------------------------|-----|
-
-| First-time setup | ✅ Yes | Seeds ChromaDB with diverse examples quickly. |
-| Adding new tables | ✅ Yes | LLM learns new schema faster. |
-| Pattern failures (joins/filters) | ✅ Yes | Provide targeted examples. |
-| Regular inference | ❌ No | Self-learning is sufficient after bootstrapping. |
-| Production usage | ❌ No | Use only when you need new Q/SQL pairs. |
+### Advanced Features:
+- **Batch-Based Generation**: Works in batches of 10 to prevent LLM output truncation.
+- **Complexity Rotation**: Automatically alternates between **BASIC, JOINS, AGGREGATES, and ADVANCED** logic to ensure a balanced knowledge base.
+- **Schema Auto-Fixer**: Injects schema prefixes into hallucinated SQL before retraining.
+- **Preview Validation**: Only trains queries that pass live database execution.
 
 **Best practice**: run it once after `train.py` and only rerun when adding tables or addressing specific mistakes.
 
@@ -156,6 +152,9 @@ Type `exit` or `quit` to stop.
 - [x] SQL Pre-Validation Layer (fuzzy table/column matching) ✅
 - [x] Startup caching for schema, relationships, samples ✅
 - [x] Auto-LIMIT safety guard ✅
+- [x] Smart Table Protection (Math/Travel logic) ✅
+- [x] PgAdmin-Ready SQL Export ✅
+- [x] Batch-Based Synthetic Generation ✅
 - [ ] Test 50+ NL queries to cover edge cases
 
 **Mid-term**

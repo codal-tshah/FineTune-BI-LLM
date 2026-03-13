@@ -163,6 +163,42 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 - **Alias Consistency Enforcement**: The Pre-Validator automatically fixes mismatched table/alias references (e.g., `flight.id` → `f.id`), preventing "missing FROM-clause" errors.
 - **Cache Bypass**: The `run()` method now accepts `use_cache=False` to force re-generation if the semantic cache contains poisoned data.
 
+## 20. Enhanced Output Formatter & PgAdmin Readiness
+
+- **Problem**: Natural Language interfaces often return escaped SQL (e.g., `\n` characters) which is hard to test in database IDEs like PgAdmin.
+- **Solution**: Implemented an enhanced reporting block in `agent_pipeline.py`:
+  - **Raw SQL Block**: The terminal now prints a clean ` ```sql ` block containing the exact generated query.
+  - **latest_query.sql Export**: Every successful run automatically overwrites a file named `latest_query.sql` in the root directory. Users can open this file and find the current query ready for execution.
+  - **Aligned Results**: Final results are displayed using Pandas' `.to_string()`, ensuring table alignment in the terminal.
+
+## 21. Smart Table Protection (Travel-Math Logic)
+
+- **Problem**: Fixed "Domain Purges" were sometimes too aggressive, removing the `flight` table for a question like "Which passengers have the most miles?" because the word "flight" wasn't present.
+- **Solution**: Implemented a **Schema-Driven Protection Layer**:
+  1. **Keyword-to-Schema Mapping**: The system scans the question keywords against the actual column names of every table.
+  2. **Semantic Metric Protection**: Created a whitelist of "Travel-Math" terms (`mile`, `distance`, `velocity`, `duration`, `speed`).
+  3. **Conditional Purge**: A table (like `flight`) is only purged if it's considered noise AND it contains no columns relevant to the user's specific query metrics.
+
+## 22. Character Normalization Layer
+
+- **Problem**: Certain LLM quantizations (especially 4-bit) occasionally output "Full-Width" characters like `＝` (Unicode `\uff1d`) instead of standard ASCII `=` which causes PostgreSQL syntax errors.
+- **Solution**: Added a normalization pass in the SQL Agent that replaces these hallucinated characters with their standard SQL equivalents before the query reaches the validator.
+
+## 23. Batch-Based Synthetic Generation & Complexity Rotation
+
+- **Problem**: Generating 100+ queries in a single LLM call lead to "Capping" where the LLM would stop at ~20-30 queries due to context window or output token limits.
+- **Solution**:
+  - **Batching**: Fixed the `synthetic_training_generator.py` to work in batches of 10.
+  - **Complexity Rotation**: Each batch cycles through different strategies (**BASIC, JOINS, AGGREGATES, ADVANCED**). This ensures the RAG knowledge base is balanced and not dominated by simple queries.
+  - **Timedelta Serialization**: Added support for `pd.Timedelta`, `pd.NA`, and `pd.NaT` in the `EnhancedJSONEncoder` to prevent crashes during the training of travel-duration queries.
+
+## 24. Post-Processing SQL Fixes (Negative Lookbehinds)
+
+- **Problem**: Simple regex qualification was turning `AS airport` into `AS "public"."airport"`, which is illegal syntax for PostgreSQL aliases.
+- **Solution**: 
+  - **Negative Lookbehind**: Updated `_ensure_schema_qualified` to use `(?<!(?i:AS)\s)`, ensuring it never qualifies a table name if it's acting as an alias.
+  - **Alias Safety Net**: Added a step in `_validate_sql` to catch and strip any `AS "schema"."table"` hallucinations that the LLM produces directly.
+
 ## Performance Notes (Mac 16GB RAM)
 
 - **Sequential Nature**: Latency is cumulative (sum of 4 LLM calls). Parallelism is not possible as agents depend on prior output.
