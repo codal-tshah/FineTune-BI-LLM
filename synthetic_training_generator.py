@@ -16,13 +16,29 @@ class EnhancedJSONEncoder(json.JSONEncoder):
             return float(obj)
         if isinstance(obj, (datetime, date, pd.Timestamp)):
             return obj.isoformat()
+        if isinstance(obj, pd.Timedelta):
+            return str(obj)
+        if pd.isna(obj):
+            return None
         return super(EnhancedJSONEncoder, self).default(obj)
 
 def generate_synthetic_data(num_examples=100):
+    """
+    Generates synthetic training data in batches to prevent LLM truncation.
+    Rotating complexity ensures a well-rounded training set (Joins, Aggregates, Advanced).
+    
+    Why this is useful for your LLM:
+    Vanna.ai uses 'Semantic Search' (RAG). When a user asks a question, it finds the most 
+    similar question-SQL pair from this training data and gives it to the SQL Engineer 
+    as a 'Reference Example'. The better this data is, the smarter your SQL Engineer becomes.
+    """
     vn = get_vanna_instance()
     connect_database(vn)
     
-    # 0. Load Existing Questions to prevent duplicates
+    batch_size = 10 # Small batches prevent the LLM from cutting off JSON or hallucinating
+    total_batches = (num_examples // batch_size) + (1 if num_examples % batch_size > 0 else 0)
+
+    # 1. Setup metadata
     existing_questions = set()
     existing_data = []
     if os.path.exists('generated_training_data.json'):
@@ -30,14 +46,10 @@ def generate_synthetic_data(num_examples=100):
             with open('generated_training_data.json', 'r') as f:
                 existing_data = json.load(f)
                 existing_questions = {item['question'].lower().strip() for item in existing_data}
-        except Exception as e:
-            print(f"Warning: Could not read existing training data: {e}")
-            existing_data = []
+        except Exception: pass
 
-    # 1. Extract Schema Info for the Prompt
     schema_query = get_schema_query()
     tables_df = vn.run_sql(schema_query)
-    
     schema_context = []
     for table in tables_df['table_name']:
         cols_df = vn.run_sql(get_columns_query(table))
@@ -48,133 +60,117 @@ def generate_synthetic_data(num_examples=100):
     relationships = ""
     if rel_query:
         rel_df = vn.run_sql(rel_query)
-        relationships = "\nRelationships:\n" + "\n".join([
+        relationships = "\nRelationships (JOIN PATHS):\n" + "\n".join([
             f"{row['table_name']}.{row['column_name']} = {row['foreign_table_name']}.{row['foreign_column_name']}"
             for _, row in rel_df.iterrows()
         ])
 
     context_str = "\n".join(schema_context) + relationships
-    schema = os.getenv("DB_SCHEMA", "public")
+    schema_name = os.getenv("DB_SCHEMA", "public")
     
-    print(f"Starting synthetic data generation for {num_examples} examples...")
-    
-    # Send existing questions to LLM to prevent overlap in the generation phase
-    exclude_list = list(existing_questions)[:20]
-    
-    prompt = f"""
-    You are a database expert for a Business Intelligence tool.
-    Based on the following database schema, generate {num_examples} diverse natural language questions and their corresponding SQL queries.
-    
-    IMPORTANT: DO NOT generate questions similar to these existing ones: {exclude_list}
-    
-    CRITICAL: You MUST use schema-qualified table names in the SQL.
-    Every table reference should be in the format: \"{schema}\".\"table_name\"
-    
-    Schema:
-    {context_str}
-    
-        Guidelines:
-        1. Questions should range from simple (count, filter) to complex (joins, aggregations, DISTINCT, GROUP BY, window functions, subqueries).
-        2. Use ONLY the tables and columns provided as shown in the schema.
-        3. When multiple tables share column names, always qualify the column with a table alias (e.g., `a.account_id` vs `account_id`).
-        4. Ensure the SQL is valid for {os.getenv('DB_TYPE', 'postgres')}.
-        5. Provide the output in a clean JSON format: 
-             [
-                 {{"question": "How many passengers are there?", "sql": "SELECT count(*) FROM \"{schema}\".\"passenger\""}}
-             ]
-        6. No text before or after the JSON. Just the array.
-    """
-
     generated_data = []
     success_count = 0
-    pairs = []
 
-    # 2. Call LLM to generate pairs
-    try:
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant and database expert. You only output valid JSON arrays."},
-            {"role": "user", "content": prompt}
+    # 2. Complexity Rotation Categories
+    categories = [
+        "BASIC: Select, Filter (WHERE), Ordering, and Counting single tables.",
+        "JOINS: Multi-table queries focusing on foreign key relationships.",
+        "AGGREGATES: Focus on GROUP BY, HAVING, and statistical functions (AVG, SUM, MIN, MAX).",
+        "ADVANCED: Focus on DISTINCT, Window Functions, Subqueries, and Complex business logic."
+    ]
+
+    print(f"🚀 Starting generation of {num_examples} examples in {total_batches} batches...")
+
+    for i in range(total_batches):
+        if success_count >= num_examples: break
+        
+        current_cat = categories[i % len(categories)]
+        remaining = num_examples - success_count
+        current_batch_count = min(batch_size, remaining)
+        
+        print(f"\n--- Batch {i+1}/{total_batches} | Strategy: {current_cat.split(':')[0]} ---")
+        
+        # Blacklist recently generated so we don't repeat
+        recent_blacklist = list(existing_questions)[-50:]
+        
+        prompt = f"""
+        You are a Senior PostgreSQL Architect. Generate exactly {current_batch_count} DIFFERENT questions and SQL queries.
+        
+        CRITICAL RULE: EVERY table name MUST be prefixed with the schema: "{schema_name}"."table_name".
+        FAILURE to use the schema prefix will make the query invalid.
+        
+        CATEGORY FOCUS: {current_cat}
+        SCHEMA TABLES: {context_str}
+        AVOID THESE: {recent_blacklist}
+
+        OUTPUT FORMAT:
+        Return ONLY a JSON array. 
+        [
+          {{"question": "...", "sql": "SELECT ... FROM \"{schema_name}\".\"table\" ..."}}
         ]
-        raw_response = vn.submit_prompt(messages)
-    
-        cleaned_response = raw_response.strip()
-        if "```json" in cleaned_response:
-            cleaned_response = cleaned_response.split("```json")[-1].split("```")[0].strip()
-        elif "```" in cleaned_response:
-            cleaned_response = cleaned_response.split("```")[-1].split("```")[0].strip()
-        
-        start_idx = cleaned_response.find("[")
-        if start_idx != -1:
-            cleaned_response = cleaned_response[start_idx:]
-            
+        """
+
         try:
-            pairs = json.loads(cleaned_response)
-        except json.JSONDecodeError:
-            last_brace = cleaned_response.rfind("}")
-            if last_brace != -1:
-                try:
-                    pairs = json.loads(cleaned_response[:last_brace+1] + "]")
-                except:
-                    print("Failed to parse JSON even after recovery attempt.")
-                    return
+            raw_response = vn.submit_prompt([{"role": "user", "content": prompt}])
+            
+            # --- ROBUST JSON EXTRACTION ---
+            # Try to find the block between [ and ]
+            json_match = re.search(r'\[.*\]', raw_response, re.DOTALL)
+            if json_match:
+                cleaned = json_match.group(0)
             else:
-                return
-
-    except Exception as e:
-        print(f"Error generating questions from LLM: {str(e)}")
-        return
-
-    # 3. Validate and Train
-    for item in pairs:
-        question = item.get('question', '').strip()
-        sql = item.get('sql')
-        
-        if not question or not sql:
-            continue
-
-        # --- DUPLICATE CHECK ---
-        if question.lower() in existing_questions:
-            print(f"Skipping: '{question}' already exists in training data.")
-            continue
+                cleaned = re.sub(r'```json\s*(.*?)\s*```', r'\1', raw_response, flags=re.DOTALL).strip()
             
-        # Safeguards
-        forbidden = ["drop", "delete", "update", "insert", "truncate", "alter"]
-        if any(cmd in sql.lower() for cmd in forbidden):
-            print(f"Skipping forbidden query: {sql}")
-            continue
+            batch_pairs = json.loads(cleaned)
             
-        print(f"Testing: {question}")
-        
-        try:
-            results = vn.run_sql(sql)
-            if results is None or results.empty:
-                print(f"Skipping: Query returned no data.")
-                continue
+            for item in batch_pairs:
+                if success_count >= num_examples: break
                 
-            vn.train(question=question, sql=sql)
-            success_count += 1
-            existing_questions.add(question.lower())
-            
-            generated_data.append({
-                "question": question,
-                "sql": sql,
-                "sample_results": results.head(5).to_dict(orient='records')
-            })
-            print(f"Success! Trained {success_count}/{num_examples}")
-            
-        except Exception as e:
-            print(f"SQL Validation Error for '{question}': {str(e)}")
-            continue
+                q = item.get('question', '').strip()
+                sql = item.get('sql', '').strip()
+                
+                if not q or not sql or q.lower() in existing_questions:
+                    continue
 
-    # 4. Save and Update
+                # Safety check
+                if any(cmd in sql.lower() for cmd in ["drop", "delete", "update", "insert"]):
+                    continue
+                
+                # --- AUTO-FIXER: If LLM forgot the schema, inject it ---
+                tables = tables_df['table_name'].tolist()
+                for table in tables:
+                    # Look for table names not already qualified with a dot or double quote
+                    pattern = rf'(?<![\w\.\"]){re.escape(table)}(?![\w\.\"])'
+                    if re.search(pattern, sql):
+                        sql = re.sub(pattern, f'"{schema_name}"."{table}"', sql)
+
+                try:
+                    # VALIDATE AGAINST DATABASE
+                    results = vn.run_sql(sql)
+                    if results is not None:
+                        # TRAIN VANNA
+                        vn.train(question=q, sql=sql)
+                        success_count += 1
+                        existing_questions.add(q.lower())
+                        
+                        generated_data.append({
+                            "question": q,
+                            "sql": sql,
+                            "preview": results.head(2).to_dict(orient='records')
+                        })
+                        print(f"  ✅ ({success_count}/{num_examples}) Trained: {q[:70]}...")
+                except Exception as e:
+                    print(f"  ❌ SQL Error: {str(e)[:120]}...")
+
+        except Exception as e:
+            print(f"  ⚠️ Batch {i+1} failed: {e}")
+
+    # 4. Save results to historical file
     final_data = existing_data + generated_data
     with open('generated_training_data.json', 'w') as f:
         json.dump(final_data, f, indent=4, cls=EnhancedJSONEncoder)
         
-    print(f"\nGeneration complete!")
-    print(f"Total NEWLY trained this run: {success_count}")
-    print(f"Total historical training records: {len(final_data)}")
-    print(f"Review data updated in 'generated_training_data.json'")
+    print(f"\n✨ DONE! Newly Generated: {success_count} | Total Knowledge Base: {len(final_data)} pairs.")
 
 if __name__ == "__main__":
     generate_synthetic_data(num_examples=100)

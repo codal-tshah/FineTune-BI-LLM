@@ -258,5 +258,99 @@
                 "last_name": "CARR"
             }
         ]
-    }
-]
+    },
+    {
+        "question": "How many different airports are there in total?",
+        "sql": "SELECT COUNT(DISTINCT airport_code) FROM postgres_air.airport;",
+        "preview": [
+            {
+                "count": 692
+            }
+        ]
+    },
+    {
+        "question": "Which flight has the shortest scheduled departure time?",
+        "sql": "SELECT * FROM postgres_air.flight ORDER BY scheduled_departure ASC LIMIT 1;",
+        "preview": [
+            {
+                "flight_id": 3259,
+                "flight_no": "88",
+                "scheduled_departure": "2024-05-27T00:55:00+05:30",
+                "scheduled_arrival": "2024-05-27T04:10:00+05:30",
+                "departure_airport": "AKL",
+                "arrival_airport": "BNE",
+                "status": "On schedule",
+                "aircraft_code": "319",
+                "actual_departure": "2024-05-27T00:55:00+05:30",
+                "actual_arrival": "2024-05-27T04:10:00+05:30",
+                "update_ts": "2024-03-27T01:55:00+05:30"
+            }
+        ]
+    },
+    {
+        "question": "How many frequent flyer accounts do we have with more than one award points?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.frequent_flyer WHERE award_points > 1;",
+        "preview": [
+            {
+                "count": 128346
+            }
+        ]
+    },
+    {
+        "question": "Which account has the most number of phone numbers associated with it?",
+        "sql": "SELECT account_id, COUNT(*) as count FROM postgres_air.phone GROUP BY account_id ORDER BY count DESC LIMIT 1;",
+        "preview": [
+            {
+                "account_id": 27996,
+                "count": 3
+            }
+        ]
+    },
+    {
+        "question": "What is the total number of flights scheduled for each airport?",
+        "sql": "SELECT arrival_airport, COUNT(flight_id) as flight_count FROM postgres_air.flight GROUP BY arrival_airport",
+        "preview": [
+            {
+                "arrival_airport": "AAH",
+                "flight_count": 156
+            },
+            {
+                "arrival_airport": "ABJ",
+                "flight_count": 416
+            }
+        ]
+    },
+    {
+        "question": "Which frequent flyer has earned the most points?",
+        "sql": "SELECT frequent_flyer_id, SUM(award_points) as total_points FROM postgres_air.frequent_flyer GROUP BY frequent_flyer_id ORDER BY total_points DESC LIMIT 1",
+        "preview": [
+            {
+                "frequent_flyer_id": 108839,
+                "total_points": 120000
+            }
+        ]
+    },
+    {
+        "question": "What is the average price of all bookings for each account?",
+        "sql": "SELECT account_id, AVG(price) as avg_price FROM postgres_air.booking GROUP BY account_id",
+        "preview": [
+            {
+                "account_id": 2,
+                "avg_price": 285.54
+            },
+            {
+                "account_id": 3,
+                "avg_price": 1328.9571428571428
+            }
+        ]
+    },
+    {
+        "question": "Which flight has the longest scheduled departure time?",
+        "sql": "SELECT flight_no, MAX(scheduled_departure - scheduled_arrival) as longest_duration FROM postgres_air.flight GROUP BY flight_no ORDER BY longest_duration DESC LIMIT 1",
+        "preview": [
+            {
+                "flight_no": "3088",
+                "longest_duration": "PT5H15M"
+            }
+        ]
+    },
