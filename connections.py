@@ -1,5 +1,6 @@
 import os
 import json
+from datetime import datetime
 from dotenv import load_dotenv
 import vanna as vn
 from vanna.legacy.ollama import Ollama
@@ -40,6 +41,19 @@ class MyVanna(ChromaDB_VectorStore, Ollama):
                 return
 
         super().log(message, title)
+
+    def log_failure(self, question: str, sql: str, error: str):
+        """Store failed SQL attempts in ChromaDB for later introspection."""
+
+        failure_record = {
+            "_type": "failure_log",
+            "question": question,
+            "sql": sql,
+            "error": error,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+
+        self.add_documentation(json.dumps(failure_record))
 
     def get_cached_query(self, question: str):
         """
