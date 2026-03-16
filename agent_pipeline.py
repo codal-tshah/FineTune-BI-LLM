@@ -565,14 +565,17 @@ class AgenticSQLPipeline_V2:
         self._cached_all_tables = list(self.schema_map.keys())
 
         # MULTI-MODEL CONFIGURATION (Optimized for 16GB Mac)
-        # Architect (3B) for planning/reasoning, SQL (6.7B) for coding
         self.models = {
+            "classifier": os.getenv("CLASSIFIER_MODEL", "gemma2:2b"),
             "architect": os.getenv("ARCHITECT_MODEL", "qwen2.5-coder:3b"),
-            "sql": os.getenv("LLM_MODEL", "deepseek-coder:6.7b")
+            "sql": os.getenv("SQL_MODEL", "qwen2.5-coder:7b"),
+            "validator": os.getenv("VALIDATOR_MODEL", "qwen2.5-coder:3b")
         }
         print("[Pipeline] Tiered Orchestration active:")
-        print(f"  - Architect: {self.models['architect']}")
-        print(f"  - SQL Engineer: {self.models['sql']}")
+        print(f"  - Classifier: {self.models['classifier']}")
+        print(f"  - Architect:  {self.models['architect']}")
+        print(f"  - SQL Eng:    {self.models['sql']}")
+        print(f"  - Validator:  {self.models['validator']}")
     
     def get_table_columns(self, table_name):
         """Fetch actual column metadata from database to prevent hallucination."""
@@ -586,18 +589,56 @@ class AgenticSQLPipeline_V2:
             print(f"Warning: Could not fetch columns for {table_name}: {e}")
             return []
 
-    def architect_agent(self, question):
+    def classifier_agent(self, question):
         """
-        Phase 1: Merges Classification & Planning.
-        Uses a smaller, faster model (3B) for mapping question to schema.
+        Phase 1: Quick classification to detect intent and domain.
+        Uses a very fast model (Gemma-2-2B).
         """
-        print("[Architect Agent] Designing query strategy...")
+        print("[Classifier Agent] Identifying domain...")
+        prompt = f"""
+        User Question: {question}
+
+        Categories:
+        - FLIGHT: Flight status, times, schedules.
+        - BOOKING: Tickets, payments, price, seats.
+        - PASSENGER: People, accounts, profiles, loyalty.
+        - AIRPORT: Airport locations, countries, codes.
+        - MISC: General help, metadata, or greetings.
+
+        Task: Return only one word from the Categories list above.
+        """
+        response = self.vn.submit_prompt_with_model([{"role": "user", "content": prompt}], model=self.models["classifier"])
+        # Clean up tags like <|thought|> if they appear
+        clean = re.sub(r'<[^>]*>', '', response).strip().upper()
+        # Find the first mention of a category
+        match = re.search(r'(FLIGHT|BOOKING|PASSENGER|AIRPORT|MISC)', clean)
+        category = match.group(1) if match else "MISC"
+        print(f"[Classifier Agent] Result: {category}")
+        return category
+
+    def architect_agent(self, question, category="MISC"):
+        """
+        Phase 2: Planning. Uses a smaller, faster model (3B) for mapping question to schema.
+        Now utilizes the category from the Classifier Agent.
+        """
+        print(f"[Architect Agent] Designing query strategy for {category}...")
         
         # 1. Hybrid Table Selection Logic (Robust)
         target_tables = set()
         all_tables = self._cached_all_tables
         
-        # A. Keyword matching (fail-safe)
+        # A. Domain-Driven Expansion (Using determined category)
+        domain_mappings = {
+            "FLIGHT": ["flight", "booking_leg", "aircraft", "airport"],
+            "BOOKING": ["booking", "booking_leg", "boarding_pass", "passenger"],
+            "PASSENGER": ["passenger", "account", "frequent_flyer", "phone"],
+            "AIRPORT": ["airport", "flight"]
+        }
+        for t in domain_mappings.get(category, []):
+            if t in all_tables:
+                target_tables.add(t)
+
+        # B. Keyword matching (fail-safe)
         question_words = set(re.findall(r'\w+', question.lower()))
         for t in all_tables:
             t_clean = t.replace('_', ' ')
@@ -640,9 +681,15 @@ class AgenticSQLPipeline_V2:
                         target_tables.add(word_clean)
             
             if valid_examples:
+                if clean_context == "No relevant examples found.": # Reset if we found anything
+                    clean_context = ""
                 context_parts = []
                 for item in valid_examples:
+                    # MASK BOTH STRINGS AND NUMBERS to prevent value leakage
+                    # Replaces 'JFK' with '<VALUE>' and numbers like 100 with <NUM>
                     s_masked = re.sub(r"'(.*?)'", "'<VALUE>'", item.get('sql', ''))
+                    s_masked = re.sub(r"\b\d+\b", "<NUM>", s_masked)
+                    
                     context_parts.append(f"Q: {item.get('question', 'N/A')}\nSQL: {s_masked}")
                 clean_context = "\n---\n".join(context_parts)
 
@@ -663,8 +710,6 @@ class AgenticSQLPipeline_V2:
                         target_tables.add(t)
 
         # D. Dynamic Protection & Domain Purge
-        # Identify "Noise" tables that are frequently hallucinated in unrelated domains
-        noise_candidates = {"flight", "booking_leg", "boarding_pass", "booking", "aircraft"}
         
         # SMART PROTECTION: Cross-reference question keywords with schema columns
         protected_tables = set()
@@ -688,7 +733,7 @@ class AgenticSQLPipeline_V2:
                     
         # Domain Purge: If question is about account/passenger, remove flight noise if not travel-math
         if any(w in question.lower() for w in ["account", "passenger", "frequent_flyer"]) and "flight" not in question.lower():
-             for t in ["flight", "aircraft", "airport"]:
+            for t in ["flight", "aircraft", "airport"]:
                 if t in target_tables and t not in protected_tables:
                     target_tables.remove(t)
         # Strategic Fallback: If no tables matched via keywords, check if it's even relevant
@@ -716,16 +761,18 @@ class AgenticSQLPipeline_V2:
         
         Task: Create a step-by-step SQL JOIN plan.
         CRITICAL RULES:
+        0. QUESTION IS KING: Focus exclusively on the requirements in the 'Question'. The 'STRUCTURAL EXAMPLES' are for syntax guidance only—DO NOT copy their filter values, columns, or logic if they differ from the question.
         1. ONLY use tables/columns listed in EXPLICIT SCHEMA.
         2. NO HALLUCINATION: Do not assume columns exist.
-        3. STRICT NO-FILTER RULE: DO NOT add WHERE clauses with specific values unless explicitly provided in the 'Question'.
+        3. STRICT FILTER RULE: If the question says 'more than 3', use ' > 3'. DO NOT use values from examples (like '10' or '100').
         4. RELEVANCY CHECK: Ignore 'STRUCTURAL EXAMPLES' that are not related to the current Question.
         5. PARSIMONY RULE: Use the ABSOLUTE MINIMUM number of tables. 
-        6. EXPLICIT OVERRIDE: If the user mentions a specific table or metric in brackets (e.g., 'via boarding_pass'), YOU MUST use that table in your PLAN and TABLES list. Failure to do so is a critical error.
+        6. EXPLICIT OVERRIDE: If the user mentions a specific table or metric in brackets (e.g., 'via boarding_pass'), YOU MUST use that table in your PLAN and TABLES list.
         7. JOIN ENFORCEMENT: Every table in TABLES must have a JOIN_LOGIC entry.
         8. IDENTIFIER GUIDE:
+           - To find a person by name/id: use 'passenger'.
+           - Counting flights for a passenger: passenger -> boarding_pass (count boarding_pass_id).
            - Linking FLIGHT and PASSENGER: flight -> booking_leg -> passenger.
-           - Linking FLIGHT and BOARDING_PASS: flight -> booking_leg -> boarding_pass.
            - Arrival vs Departure: 'arrivals' maps to arrival_airport, 'departures' maps to departure_airport.
         
         9. HUMAN-READABILITY RULE: When a user asks to "list", "show", or group by an entity (e.g., passenger, aircraft, airport, etc..), you MUST include descriptive columns in your plan (e.g., first_name, last_name, airport_name, model) instead of just IDs.
@@ -814,7 +861,8 @@ class AgenticSQLPipeline_V2:
         # Note: Heavy hex stripping (UUIDs) moved to _validate_sql for safer context-aware cleaning.
         
         sql_match = re.search(r'```sql\n(.*?)\n```', sql, re.DOTALL | re.IGNORECASE)
-        if not sql_match: sql_match = re.search(r'```(.*?)```', sql, re.DOTALL)
+        if not sql_match:
+            sql_match = re.search(r'```(.*?)```', sql, re.DOTALL)
         final_sql = sql_match.group(1).strip() if sql_match else sql.strip()
 
         if "SELECT" in final_sql.upper():
@@ -873,9 +921,14 @@ class AgenticSQLPipeline_V2:
             if cached_results is not None:
                 return cached_results
 
-        # --- Phase 1: Architect (3B) ---
+        # --- Phase 1: Classifier (2B) ---
+        p_c_start = time.time()
+        category = self.classifier_agent(question)
+        latencies["classifier"] = time.time() - p_c_start
+        
+        # --- Phase 2: Architect (3B) ---
         p1_start = time.time()
-        plan = self.architect_agent(question)
+        plan = self.architect_agent(question, category=category)
         
         # OFF-TOPIC GUARD
         if "OFF_TOPIC" in plan.upper():
@@ -953,14 +1006,20 @@ class AgenticSQLPipeline_V2:
             with open("latest_query.sql", "w", encoding="utf-8") as f:
                 f.write(f"-- Question: {question}\n{sql}")
             print("💡 Tip: You can also find this SQL in 'latest_query.sql'")
-        except Exception: pass
+        except Exception:
+            pass
 
         print("-" * 50)
         print("📈 RESULTS TABLE:")
-        if results is not None and not results.empty:
-            print(results.to_string(index=False))
+        if results is not None:
+            if isinstance(results, pd.DataFrame) and not results.empty:
+                print(results.to_string(index=False))
+            elif isinstance(results, pd.DataFrame):
+                print("No data found.")
+            else:
+                print(f"Unexpected results format: {type(results)}")
         else:
-            print("No data found.")
+            print("Execution failed or no results.")
         print("="*50 + "\n")
         
         return results
@@ -1129,4 +1188,5 @@ class AgenticSQLPipeline_V2:
 if __name__ == "__main__":
     agent = AgenticSQLPipeline_V2()
     # Test complex query
-    print(agent.run("names of all passengers on flight id 100"))
+    # print(agent.run("names of all passengers on flight id 100"))
+    print(agent.run("Find aircrafts are used in more than 12000 flights"))
