@@ -6,7 +6,7 @@ A production-ready Business Intelligence toolkit that turns natural language int
 
 - **Tiered Multi-Model Orchestration (V2)**: Uses a fast 3B model (Architect) for planning and a powerful 6.7B model (SQL Engineer) for generation.
 - **Smart Table Protection**: Dynamic pruning logic that cross-references queries against schema metrics (e.g., protects `flight` for "miles" or "velocity" queries even if "flight" isn't mentioned).
-- **Off-Topic Guard**: Semantic filter that rejects greetings or random chat, providing a helpful summary of what the assistant *can* answer instead of failing.
+- **Off-Topic Guard**: Semantic filter that rejects greetings or random chat, providing a helpful summary of what the assistant _can_ answer instead of failing.
 - **SQL Pre-Validation (V3)**: Now includes **Hex Healing** to fix internal LLM junk (e.g., `flight67e..._id` -> `flight_id`) and repairs broken join syntax (`f. = bl.`).
 - **Human-Readable Results**: Optimized SELECT logic that prioritizes descriptive columns (names, titles, models) over raw IDs.
 - **PgAdmin-Ready Output**: Displays raw SQL in markdown blocks for easy copy-pasting and automatically exports current results to `latest_query.sql`.
@@ -43,7 +43,7 @@ graph TD
 ## 📁 Project Layout
 
 | File/folder | Responsibility |
-|-------------|----------------|
+| ----------- | -------------- |
 
 | `app.py` | Entry point with interactive CLI + `ask_question` helper |
 | `agent_pipeline.py` | Core 4-agent pipeline (Classifier, Planner, SQL, Validator) |
@@ -125,15 +125,17 @@ print(result)
 Or run `python app.py` for an interactive CLI:
 
 ```💬 Ask your question: <type here>
+
 ```
 
 Type `exit` or `quit` to stop.
 
 - `-q / --question`: Run a single question without the interactive loop.
 - `-t / --test`: Run the built-in test question list.
-- `VANNA_SHOW_PROMPTS=1`: Run this when you *need* to see the Ollama prompts/response dumps for debugging (hidden otherwise).
+- `VANNA_SHOW_PROMPTS=1`: Run this when you _need_ to see the Ollama prompts/response dumps for debugging (hidden otherwise).
 
-### Advanced Features:
+### Advanced Features
+
 - **Batch-Based Generation**: Works in batches of 10 to prevent LLM output truncation.
 - **Complexity Rotation**: Automatically alternates between **BASIC, JOINS, AGGREGATES, and ADVANCED** logic to ensure a balanced knowledge base.
 - **Schema Auto-Fixer**: Injects schema prefixes into hallucinated SQL before retraining.
@@ -143,7 +145,7 @@ Type `exit` or `quit` to stop.
 
 ## 🛠️ Next Steps & Roadmap
 
-**Short-term**
+### Short-term
 
 - [x] Planner/SQL/Validator pipeline running ✅
 - [x] Schema-introspection + strict schema reference ✅
@@ -157,13 +159,13 @@ Type `exit` or `quit` to stop.
 - [x] Batch-Based Synthetic Generation ✅
 - [ ] Test 50+ NL queries to cover edge cases
 
-**Mid-term**
+### Mid-term
 
 - Add Flask/FastAPI + React UI for business users
 - Switch to a faster LLM (Gemini Flash API or GPU-accelerated Ollama)
 - Add MySQL/SQLite connectors inside `connections.py`
 
-**Long-term**
+### Long-term
 
 - Fine-tune DeepSeek with domain-specific SQL patterns
 - Build query analytics dashboard (from `metrics.jsonl`)
@@ -172,27 +174,27 @@ Type `exit` or `quit` to stop.
 
 ## ⚡ Performance Tips (Mac 16GB RAM)
 
-| Optimization | Expected Impact | How |
-|---|---|---|
-| **Use Apple Silicon GPU** | 3-5x faster inference | Ollama auto-detects Metal GPU on M-series Macs |
-| **Smaller model** (`deepseek-coder:1.3b`) | 2-3x faster | Change `LLM_MODEL` in `.env` (lower accuracy) |
-| **Quantized model** (`qwen2.5-coder:3b`) | 2x faster, better accuracy | `ollama pull qwen2.5-coder:3b` |
-| **API-based LLM** (Gemini Flash) | 10-20x faster | Free tier available, swap Ollama for API client |
-| **Reduce `num_ctx`** | Less RAM, faster | Set `OLLAMA_NUM_CTX=2048` (default: 4096) |
+| Optimization                              | Expected Impact            | How                                             |
+| ----------------------------------------- | -------------------------- | ----------------------------------------------- |
+| **Use Apple Silicon GPU**                 | 3-5x faster inference      | Ollama auto-detects Metal GPU on M-series Macs  |
+| **Smaller model** (`deepseek-coder:1.3b`) | 2-3x faster                | Change `LLM_MODEL` in `.env` (lower accuracy)   |
+| **Quantized model** (`qwen2.5-coder:3b`)  | 2x faster, better accuracy | `ollama pull qwen2.5-coder:3b`                  |
+| **API-based LLM** (Gemini Flash)          | 10-20x faster              | Free tier available, swap Ollama for API client |
+| **Reduce `num_ctx`**                      | Less RAM, faster           | Set `OLLAMA_NUM_CTX=2048` (default: 4096)       |
 
 > **Note**: The 4 agents are sequential by design (each needs the previous output). Parallelism does not help here — faster inference is the key.
 
 ## ⚠️ Known Limitations & Cons
 
-| Limitation | Impact | Mitigation |
-|---|---|---|
-| **6.7B model accuracy** | Hallucinated columns/joins on complex queries | SQL Pre-Validator catches ~80% of these |
-| **Sequential pipeline** | Total latency = sum of all 4 LLM calls (50-120s on CPU) | Use GPU or API model |
-| **No multi-turn context** | Each question is independent — no "follow up" support | Future: add conversation memory |
-| **PostgreSQL only** | MySQL/SQLite connectors exist but are untested | Future: expand DB support |
-| **No UI** | CLI-only interface | Future: Flask/React frontend |
-| **Auto-LIMIT 100** | Large analytical queries may need manual LIMIT override | Pass explicit LIMIT in the question |
-| **Self-learning pollution** | Bad queries could be auto-trained into ChromaDB | Future: add human-in-the-loop validation |
+| Limitation                  | Impact                                                  | Mitigation                               |
+| --------------------------- | ------------------------------------------------------- | ---------------------------------------- |
+| **6.7B model accuracy**     | Hallucinated columns/joins on complex queries           | SQL Pre-Validator catches ~80% of these  |
+| **Sequential pipeline**     | Total latency = sum of all 4 LLM calls (50-120s on CPU) | Use GPU or API model                     |
+| **No multi-turn context**   | Each question is independent — no "follow up" support   | Future: add conversation memory          |
+| **PostgreSQL only**         | MySQL/SQLite connectors exist but are untested          | Future: expand DB support                |
+| **No UI**                   | CLI-only interface                                      | Future: Flask/React frontend             |
+| **Auto-LIMIT 100**          | Large analytical queries may need manual LIMIT override | Pass explicit LIMIT in the question      |
+| **Self-learning pollution** | Bad queries could be auto-trained into ChromaDB         | Future: add human-in-the-loop validation |
 
 ## ❓ FAQ
 

@@ -209,6 +209,7 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 1. **6.7B Accuracy**: Hallucinations on complex queries still occur; SQL Pre-Validator and Schema Pruning catch ~90%.
 2. **PostgreSQL focus**: MySQL/SQLite support exists but is secondary.
 3. **No multi-turn context**: Each question is treated as a new session.
+
 ## 25. Off-Topic Rejection Guard
 
 - **Problem**: Small models often try to "force" a SQL query for general conversation (e.g., "hi", "how are you"), leading to hallucinated queries on random tables.
