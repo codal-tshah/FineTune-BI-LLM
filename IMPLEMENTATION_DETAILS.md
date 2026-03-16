@@ -73,15 +73,15 @@
 
 ## Updated Component Matrix
 
-| Component | Library/Tool | Role |
-| :--- | :--- | :--- |
-| **Pipeline** | `AgenticSQLPipeline` | 4-Agent Orchestration (Classifier/Planner/SQL/Validator). |
-| **Cache** | `MyVanna.get_cached_query` | Semantic Normalization & Fast Path Retrieval. |
-| **LLM Service** | `vanna.legacy.ollama.Ollama` | Logic for prompting the local model. |
-| **Vector Index** | `vanna.legacy.chromadb.ChromaDB_VectorStore` | Storage and retrieval for DDL/SQL examples. |
-| **Orchestration** | Custom `MyVanna` Class | Integrates LLM, Vector Store, and Cache. |
-| **Model Engine** | `Ollama` (`deepseek-coder:6.7b`) | Local inference engine. |
-| **Deep Persistence** | `SQLAlchemy` (`QueuePool`) | Efficient connection to PostgreSQL. |
+| Component            | Library/Tool                                 | Role                                                      |
+| :------------------- | :------------------------------------------- | :-------------------------------------------------------- |
+| **Pipeline**         | `AgenticSQLPipeline`                         | 4-Agent Orchestration (Classifier/Planner/SQL/Validator). |
+| **Cache**            | `MyVanna.get_cached_query`                   | Semantic Normalization & Fast Path Retrieval.             |
+| **LLM Service**      | `vanna.legacy.ollama.Ollama`                 | Logic for prompting the local model.                      |
+| **Vector Index**     | `vanna.legacy.chromadb.ChromaDB_VectorStore` | Storage and retrieval for DDL/SQL examples.               |
+| **Orchestration**    | Custom `MyVanna` Class                       | Integrates LLM, Vector Store, and Cache.                  |
+| **Model Engine**     | `Ollama` (`deepseek-coder:6.7b`)             | Local inference engine.                                   |
+| **Deep Persistence** | `SQLAlchemy` (`QueuePool`)                   | Efficient connection to PostgreSQL.                       |
 
 ## Training & "Fine-Tuning" Logic (RAG vs Fine-Tuning)
 
@@ -97,7 +97,7 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 
 ### How it works at Runtime
 
-1. **Search**: When you ask a question, Vanna searches ChromaDB for the *most similar* schema and SQL examples.
+1. **Search**: When you ask a question, Vanna searches ChromaDB for the _most similar_ schema and SQL examples.
 2. **Context Injection**: These retrieved snippets are injected into the **Prompt** sent to DeepSeek.
 3. **Inference**: DeepSeek uses this "context" to write a precise SQL query for your specific database.
 
@@ -148,7 +148,7 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 
 - **Problem**: **Context Leakage**. Small models often copy specific filter values (e.g., `'JFK'`, `'LAX'`, `'2023-01-01'`) from training examples into the current query even if not requested.
 - **Solution**: Programmatically mask all single-quoted strings in training data retrieved from ChromaDB: `WHERE airport = 'JFK'` becomes `WHERE airport = '<VALUE>'`.
-- **Impact**: The model learns the *structure* of the SQL without being poisoned by the *values* of previous queries.
+- **Impact**: The model learns the _structure_ of the SQL without being poisoned by the _values_ of previous queries.
 
 ## 18. Syntax Stability (CTE Ban)
 
@@ -195,7 +195,7 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 ## 24. Post-Processing SQL Fixes (Negative Lookbehinds)
 
 - **Problem**: Simple regex qualification was turning `AS airport` into `AS "public"."airport"`, which is illegal syntax for PostgreSQL aliases.
-- **Solution**: 
+- **Solution**:
   - **Negative Lookbehind**: Updated `_ensure_schema_qualified` to use `(?<!(?i:AS)\s)`, ensuring it never qualifies a table name if it's acting as an alias.
   - **Alias Safety Net**: Added a step in `_validate_sql` to catch and strip any `AS "schema"."table"` hallucinations that the LLM produces directly.
 
