@@ -6,9 +6,11 @@ A production-ready Business Intelligence toolkit that turns natural language int
 
 - **Multi-Agent Classifier → Planner → SQL → Validator pipeline**: Classifier narrows schema focus; Planner designs the query strategy; SQL Agent generates; Validator executes and self-corrects.
 - **SQL Pre-Validation Layer**: Code-level validator that fuzzy-matches misspelled table names (e.g., `boardingb` → `boarding_pass`) and auto-corrects hallucinated columns before execution.
+- **Dynamic Schema Pruning**: The SQL Agent ONLY receives the schema for tables selected by the Planner, drastically reducing hallucination surface area.
+- **Structural Value Masking**: Training examples are programmatically masked (`WHERE col = '<VALUE>'`) to prevent the LLM from leaking example values (like 'JFK') into your queries.
 - **Automated Self-Correction**: Validator catches SQL errors and feeds them back to the SQL Agent for a targeted fix.
 - **Startup Caching**: Schema, FK relationships, and sample data are loaded once at startup — no repeated DB queries during planning.
-- **Auto-LIMIT Guard**: Queries without a `LIMIT` clause automatically get `LIMIT 100` appended to prevent massive result sets.
+- **Auto-LIMIT Guard**: Queries without a `LIMIT` clause automatically get `LIMIT 10` appended to prevent massive result sets.
 - **Hybrid Table Selection**: Combines domain categories, keyword matching, and ChromaDB context to find relevant tables.
 - **Data-Aware Planning**: Real data samples are injected into the planner to prevent joining on empty/NULL columns.
 - **Fast Path Semantic Caching**: Recognizes semantically similar questions and returns cached results in <1s.

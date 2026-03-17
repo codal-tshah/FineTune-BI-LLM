@@ -69,11 +69,11 @@ class AgenticSQLPipeline:
         # Use cached relationships (loaded once at startup)
         rel_text = self._cached_rel_text
         
-        # Domain-driven table filtering to reduce context noise
+        # Domain-driven table filtering - adding 'booking_leg' and 'boarding_pass' as primary bridges
         domain_tables = {
-            "FLIGHT": ["flight", "aircraft", "airport", "booking_leg"],
+            "FLIGHT": ["flight", "aircraft", "airport", "booking_leg", "boarding_pass"],
             "BOOKING": ["booking", "booking_leg", "boarding_pass", "passenger", "account"],
-            "PASSENGER": ["account", "passenger", "frequent_flyer", "phone", "boarding_pass"],
+            "PASSENGER": ["account", "passenger", "frequent_flyer", "phone", "boarding_pass", "booking_leg"],
             "AIRPORT": ["airport", "flight"],
             "MISC": [] # Fallback to all
         }
@@ -111,14 +111,16 @@ class AgenticSQLPipeline:
                 sample_data = self._cached_samples.get(t, "No samples available.")
                 table_context_str += f"\nTable: {t}\nColumns: {cols}\nSample Data: {sample_data}\n"
 
-        # 3. Sanitize training context to prevent internal ID leakage
+        # 3. Sanitize training context & Mask values to prevent copying
         clean_context = "No relevant examples found."
         if training_data:
             context_parts = []
             for item in training_data:
                 q = item.get('question', 'N/A')
                 s = item.get('sql', 'N/A')
-                context_parts.append(f"Question: {q}\nSQL: {s}")
+                # MASK ALL LITERAL VALUES: Replaces 'JFK' with '<VALUE>'
+                s_masked = re.sub(r"'(.*?)'", "'<VALUE>'", s)
+                context_parts.append(f"Question: {q}\nSQL: {s_masked}")
             clean_context = "\n---\n".join(context_parts)
 
         prompt = f"""
@@ -126,28 +128,31 @@ class AgenticSQLPipeline:
         Question: {question}
         Strict Relationship Reference (USE THESE FOR JOINS - DO NOT INVENT IDS):{rel_text}
         
-        Potential Context (USE SELECTIVELY - DO NOT COPY VALUES OR IDS): {clean_context}
+        Potential Context (STRUCTURAL EXAMPLES ONLY - DO NOT COPY VALUES LIKE 'LAX' or DATES): {clean_context}
         Strict Schema Reference:{table_context_str}
         
         Task: Create a step-by-step plan to solve this using SQL. 
         CRITICAL RULES:
         1. ONLY use tables and columns exactly as named in the 'Strict Schema Reference' above.
         2. NO HALLUCINATION: DO NOT assume a table has a generic 'id' or 'uid' column. Look at the column names provided. If it has 'passenger_id', use that.
-        3. DO NOT JOIN tables unless you need columns that are not available in the primary table. Check the 'Sample Data' to see if columns are likely to be populated.
-        3. DATA WARNING: In the 'passenger' table, 'account_id' is often empty/NULL. Do NOT join 'passenger' and 'account' unless the question explicitly asks for account details (like login/email). If the question is just about passenger attributes (like age), use 'passenger' table ALONE.
-        4. CONTEXT PRUNING: Only use retrieved 'Potential Context' if it is DIRECTLY RELEVANT to the current question. If the context contains filters (like age, date) that are NOT mentioned in the question, DISCARD THOSE FILTERS.
-        5. JOIN ENFORCEMENT: Every table mentioned in TABLES must have a corresponding entry in JOIN_LOGIC (unless only one table is used). Ensure you have a clear path (e.g., A -> B -> C).
-        6. Identifiers guide:
+        3. NO FILTER HALLUCINATION: DO NOT add WHERE clauses with specific values (like 'LAX', 'DEN', or specific dates) unless they are in the user question.
+        4. SHORTEST PATH: Join booking_leg and passenger directly using 'booking_id'. Do not use 'boarding_pass' unless the question asks for pass details.
+        5. CONTEXT PRUNING: Only use retrieved 'Potential Context' if it is DIRECTLY RELEVANT to the current question. 
+        6. JOIN ENFORCEMENT: Every table mentioned in TABLES must have a corresponding entry in JOIN_LOGIC.
+        7. Identifiers guide:
            - To find a person by email, check 'booking.email' or 'account.login'.
-           - To get boarding pass details, use 'boarding_pass' and join with 'passenger'.
-        7. Focus on correctness: If a column doesn't exist, use the most plausible path using provided IDs.
-        8. PARSIMONY RULE: Use the MINIMUM number of tables possible. If a question can be answered from one table, DO NOT join others. Do not add filters (WHERE clauses) that were not explicitly mentioned in the question.
+           - Path: flight.flight_id -> booking_leg.flight_id -> booking_leg.booking_id -> passenger.booking_id.
+        8. PARSIMONY RULE: Use the MINIMUM number of tables possible. If a question can be answered from one table, DO NOT join others.
+        
         Plan format: 
-        TABLES: [table1, table2]
-        JOIN_LOGIC: [table1.col = table2.col or 'None']
+        TABLES: [table1, table2, table3]
+        JOIN_LOGIC: [table1.col = table2.col, table2.col = table3.col]
         STEPS: [1. Filter by X, 2. Join Y, 3. Aggregate Z]
         
-        8. Always qualify columns with table aliases when multiple tables share the same column name.
+        CRITICAL BRIDGE KNOWLEDGE:
+        - To link FLIGHT and PASSENGER, you MUST go through BOOKING_LEG.
+        - Path: flight.flight_id -> booking_leg.flight_id -> booking_leg.booking_id -> passenger.booking_id (or boarding_pass).
+        - NEVER join flight and passenger directly.
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         return response
@@ -175,32 +180,47 @@ class AgenticSQLPipeline:
             Please analyze the error and Provide a FIXED SQL query.
             """
 
-        # Build a compact schema reference for the SQL Agent
+        # 1. DYNAMIC SCHEMA PRUNING: Only send schema for tables mentioned in the Plan
+        # Extract table names from the plan (handles "TABLES: [a, b]" or just "a, b")
+        plan_tables = []
+        table_section = re.search(r'TABLES:\s*\[?([\w\s,]+)\]?', plan, re.IGNORECASE)
+        if table_section:
+            plan_tables = [t.strip().lower() for t in table_section.group(1).split(',')]
+        
+        # Build a pruned schema reference for the SQL Agent
         schema_ref = ""
-        for table, cols in self.schema_map.items():
-            schema_ref += f"\n  {table}: [{', '.join(cols)}]"
+        tables_found = 0
+        for table in plan_tables:
+            if table in self.schema_map:
+                cols = self.schema_map[table]
+                schema_ref += f"\n  {table}: [{', '.join(cols)}]"
+                tables_found += 1
+        
+        # Fallback to full schema if parsing failed or no tables found
+        if tables_found == 0:
+            for table, cols in self.schema_map.items():
+                schema_ref += f"\n  {table}: [{', '.join(cols)}]"
 
         prompt = f"""
         Original Question: {question}
         Plan: {plan}
         {correction_prompt}
         
-        EXACT DATABASE SCHEMA (use ONLY these table and column names):{schema_ref}
+        EXACT DATABASE SCHEMA (ONLY use these tables):{schema_ref}
 
-        JOIN PATH REFERENCE (use THESE for multi-table queries):
+        JOIN PATH REFERENCE:
         {self._cached_rel_text}
 
-        Task: Write a single, valid standard SQL query to answer the question using the provided plan. 
+        Task: Write a single, valid standard SQL query to answer the question using the EXACT plan and schema provided. 
         Use the schema-qualified format: "{os.getenv('DB_SCHEMA', 'public')}"."table_name"
         CRITICAL: 
-        - ONLY use column names from the EXACT DATABASE SCHEMA above. Cross-check every column.
-        - For multi-table queries, follow the JOIN PATH REFERENCE above to find the correct join columns.
-        - DO NOT guess or hallucinate generic 'id' columns. If the table has 'passenger_id', use that.
-        - ONLY return the SQL code inside a single code block. 
-        - DO NOT provide multiple options. 
-        - DO NOT add commentary. 
-        - DO NOT return more than one SELECT statement.
-        - DO NOT use parameterized queries (e.g., :age, :name, $1). Use literal values or remove the filter if the value is unknown.
+        - DO NOT USE CTEs: Do not use 'WITH' clauses or sub-queries unless absolutely necessary. Use simple JOINS.
+        - DO NOT HALLUCINATE VALUES: Do not add WHERE filters with specific strings or IDs (like 'LAX' or 'DEN') unless they were in the 'Original Question'.
+        - ONLY use tables and columns listed in the 'EXACT DATABASE SCHEMA' section. 
+        - Follow the JOIN_LOGIC in the Plan strictly.
+        - For multi-table queries, cross-check against the JOIN PATH REFERENCE.
+        - ONLY return the SQL code inside a code block. 
+        - DO NOT guess or hallucinate columns.
         """
         response = self.vn.submit_prompt([{"role": "user", "content": prompt}])
         
@@ -269,7 +289,7 @@ class AgenticSQLPipeline:
 
         for table in self.schema_tables:
             pattern = (
-                rf'(?<![\w\.\"])'
+                r'(?<![\w\.\"])'
                 + re.escape(table)
                 + r'(?![\w\.\"])'
             )

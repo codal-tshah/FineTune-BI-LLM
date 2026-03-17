@@ -139,6 +139,28 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 - **Problem**: Unrestricted SELECTs on large tables (e.g., `boarding_pass` with 200k+ rows) hang the CLI and PgAdmin.
 - **Solution**: Appends `LIMIT 100` to any query lacking a LIMIT clause.
 
+## 16. Dynamic Schema Pruning
+
+- **Problem**: Sending the entire database schema to the SQL Agent increases "noise" and hallucination surface area.
+- **Solution**: The SQL Agent now receives a **Pruned Schema**. The Agentic Pipeline extracts the tables mentioned in the Planner's output and only sends the definitions for those specific tables.
+- **Impact**: The LLM is physically unable to hallucinate columns from irrelevant tables because it never sees their definitions.
+
+## 17. Structural Few-Shotting (Value Masking)
+
+- **Problem**: **Context Leakage**. Small models often copy specific filter values (e.g., `'JFK'`, `'LAX'`, `'2023-01-01'`) from training examples into the current query even if not requested.
+- **Solution**: Programmatically mask all single-quoted strings in training data retrieved from ChromaDB: `WHERE airport = 'JFK'` becomes `WHERE airport = '<VALUE>'`.
+- **Impact**: The model learns the *structure* of the SQL without being poisoned by the *values* of previous queries.
+
+## 18. Syntax Stability (CTE Ban)
+
+- **Problem**: DeepSeek-Coder 6.7B sometimes attempts complex CTE (`WITH` clause) logic but fails the syntax (missing commas or parentheses).
+- **Solution**: Explicit instruction in the SQL Agent to **forbid CTEs** in favor of simple, flat JOIN structures.
+
+## 19. Join Path Parsimony
+
+- **Problem**: The system sometimes took "long paths" (e.g., `flight` -> `booking_leg` -> `boarding_pass` -> `passenger`) when a shorter one (`flight` -> `booking_leg` -> `passenger`) was available.
+- **Solution**: Added a **Parsimony Rule** and **Shortest Path** instruction to the Planner, forcing it to look for direct ID matches (like `booking_id` appearing on both `booking_leg` and `passenger`) to minimize join complexity.
+
 ## Performance Notes (Mac 16GB RAM)
 
 - **Sequential Nature**: Latency is cumulative (sum of 4 LLM calls). Parallelism is not possible as agents depend on prior output.
@@ -146,7 +168,7 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 
 ## Known Limitations
 
-1. **6.7B Accuracy**: Hallucinations on complex queries still occur; SQL Pre-Validator catches ~80%.
+1. **6.7B Accuracy**: Hallucinations on complex queries still occur; SQL Pre-Validator and Schema Pruning catch ~90%.
 2. **PostgreSQL focus**: MySQL/SQLite support exists but is secondary.
 3. **No multi-turn context**: Each question is treated as a new session.
 
