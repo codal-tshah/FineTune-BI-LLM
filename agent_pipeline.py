@@ -610,17 +610,25 @@ class AgenticSQLPipeline_V2:
         if training_data:
             # ONLY use training data if it shares keywords with the question
             valid_examples = []
+            question_lower = question.lower()
+            # Core domain keywords to ensure we don't pick up "flight" examples for "airport" questions
+            core_keywords = ["airport", "flight", "booking", "passenger", "account", "aircraft", "boarding_pass", "frequent_flyer"]
+            matched_keywords = [w for w in core_keywords if w in question_lower]
+            
             for item in training_data:
                 q_example = item.get('question', '').lower()
-                # Check if example is actually relevant to question keywords
-                if any(word in q_example for word in ["airport", "flight", "booking", "passenger", "account"] if word in question.lower()):
-                    valid_examples.append(item)
-                    # Also extract tables from these relevant examples
-                    sql_words = re.findall(r'[\w\"]+', item.get('sql', ''))
-                    for word in sql_words:
-                        word_clean = word.strip('"').lower()
-                        if word_clean in all_tables:
-                            target_tables.add(word_clean)
+                # If question has specific keywords, the example MUST have at least one of them to be valid context
+                if matched_keywords:
+                    if not any(w in q_example for w in matched_keywords):
+                        continue # Skip irrelevant example (e.g., flight example for an airport question)
+                
+                valid_examples.append(item)
+                # Also extract tables from these relevant examples
+                sql_words = re.findall(r'[\w\"]+', item.get('sql', ''))
+                for word in sql_words:
+                    word_clean = word.strip('"').lower()
+                    if word_clean in all_tables:
+                        target_tables.add(word_clean)
             
             if valid_examples:
                 context_parts = []
@@ -644,6 +652,35 @@ class AgenticSQLPipeline_V2:
                     if t in all_tables:
                         target_tables.add(t)
 
+        # D. Dynamic Protection & Domain Purge
+        # Identify "Noise" tables that are frequently hallucinated in unrelated domains
+        noise_candidates = {"flight", "booking_leg", "boarding_pass", "booking", "aircraft"}
+        
+        # SMART PROTECTION: Cross-reference question keywords with schema columns
+        protected_tables = set()
+        question_words = set(re.findall(r'\w+', question.lower()))
+        for t in target_tables:
+            if t in self.schema_map:
+                cols_str = " ".join(self.schema_map[t]).lower()
+                # 1. Direct Column Match: If question mentions a column name, protect the table
+                if any(word in cols_str for word in question_words if len(word) > 3):
+                    protected_tables.add(t)
+                # 2. Semantic Travel-Math: Protect distance/time tables for relevant questions
+                math_keywords = ["mile", "distance", "velocity", "duration", "time", "speed", "length"]
+                if any(kw in cols_str and kw in question.lower() for kw in math_keywords):
+                    protected_tables.add(t)
+
+        # Domain Purge: If question is about airports but NOT about flight mechanics/travel
+        if "airport" in question.lower() and not any(w in question.lower() for w in ["flight", "scheduled", "depart", "arrive"]):
+            for t in ["flight", "booking_leg", "boarding_pass", "booking"]:
+                if t in target_tables and t not in protected_tables:
+                    target_tables.remove(t)
+                    
+        # Domain Purge: If question is about account/passenger, remove flight noise if not travel-math
+        if any(w in question.lower() for w in ["account", "passenger", "frequent_flyer"]) and "flight" not in question.lower():
+             for t in ["flight", "aircraft", "airport"]:
+                if t in target_tables and t not in protected_tables:
+                    target_tables.remove(t)
         # Fallback if still empty (use primary tables)
         if not target_tables:
             primary_tables = ["flight", "booking", "passenger", "airport", "account"]
@@ -682,6 +719,10 @@ class AgenticSQLPipeline_V2:
         TABLES: [table1, table2, table3]
         JOIN_LOGIC: [table1.id = table2.id, table2.id = table3.id]
         STEPS: [1. filter X, 2. join Y, 3. count Z]
+
+        CRITICAL AGGREGATION RULE:
+        - If the question contains "each", "per", or "by" (e.g., "per city", "each aircraft"), you MUST include a 'GROUP BY' step in your STEPS and specify the grouping column.
+        - Example Question: "Number of airports in each country" -> STEPS: [1. Count (*), 2. GROUP BY iso_country]
         """
         response = self.vn.submit_prompt_with_model([{"role": "user", "content": prompt}], model=self.models["architect"])
         return response
@@ -758,6 +799,10 @@ class AgenticSQLPipeline_V2:
         if final_sql and 'LIMIT' not in final_sql.upper():
             final_sql = final_sql.rstrip().rstrip(';') + "\nLIMIT 10;"
 
+        # --- CHARACTER NORMALIZATION ---
+        # Replace full-width characters hallucinated by some models (e.g. ＝ -> =)
+        final_sql = final_sql.replace('\uff1d', '=')
+        
         return final_sql.strip()
 
     def validator_agent(self, question, sql):
@@ -840,10 +885,37 @@ class AgenticSQLPipeline_V2:
             f.write(json.dumps(metrics) + "\n")
         
         if error:
-            print(f"🛑 Error: {error}")
+            print(f"\n🛑 Error: {error}")
             return None
             
         self.log_stage("Phase 3 - Validator", "Success", f"Total: {total_time:.1f}s")
+        
+        # --- ENHANCED READABILITY OUTPUT ---
+        print("\n" + "="*50)
+        print("📊 FINAL QUERY RESULTS")
+        print("="*50)
+        print(f"Question: {question}")
+        print("-" * 50)
+        print("🔍 GENERATED SQL (Copy to PgAdmin):")
+        print("\n```sql")
+        print(sql)
+        print("```\n")
+        
+        # Write to a helper file for easy copy-paste
+        try:
+            with open("latest_query.sql", "w", encoding="utf-8") as f:
+                f.write(f"-- Question: {question}\n{sql}")
+            print("💡 Tip: You can also find this SQL in 'latest_query.sql'")
+        except Exception: pass
+
+        print("-" * 50)
+        print("📈 RESULTS TABLE:")
+        if results is not None and not results.empty:
+            print(results.to_string(index=False))
+        else:
+            print("No data found.")
+        print("="*50 + "\n")
+        
         return results
 
     def log_stage(self, stage, status, detail=None):
@@ -967,14 +1039,21 @@ class AgenticSQLPipeline_V2:
                         print(f"[SQL Pre-Validator] Fixing column: '{qualifier}.{column}' → '{qualifier}.{correct_col}'")
                         fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{qualifier}.{correct_col}")
         
+        # --- Step 3: Strip illegal schema-qualified aliases ---
+        schema = os.getenv("DB_SCHEMA", "public")
+        fixed_sql = re.sub(rf'AS\s+"{schema}"\."([a-zA-Z_]\w*)"', r'AS \1', fixed_sql, flags=re.IGNORECASE)
+
         return fixed_sql
 
     def _ensure_schema_qualified(self, sql):
+        """Rewrites unqualified table names to include the schema, avoiding aliases."""
         if not self.schema_tables: return sql
         schema = os.getenv("DB_SCHEMA", "public")
         qualified_sql = sql
         for table in self.schema_tables:
-            pattern = rf'(?<![\w\.\"]){re.escape(table)}(?![\w\.\"])'
+            # Lookbehind to ensure not preceded by 'AS ' or '.' or '"'
+            # Lookahead to ensure not followed by '.' or '"'
+            pattern = rf'(?<!(?i:AS)\s)(?<![\w\.\"]){re.escape(table)}(?![\w\.\"])'
             qualified_sql = re.sub(pattern, f'"{schema}"."{table}"', qualified_sql)
         return qualified_sql
 

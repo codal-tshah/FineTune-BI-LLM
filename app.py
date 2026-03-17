@@ -11,7 +11,7 @@ This module provides a unified interface for:
 import argparse
 from typing import List
 
-from agent_pipeline_v2 import AgenticSQLPipeline_V2
+from agent_pipeline import AgenticSQLPipeline_V2
 
 def ask_question(question: str):
     """
@@ -50,7 +50,7 @@ def _print_results(result):
         print(str(result))
 
 
-def interactive_loop():
+def interactive_loop(use_cache=True):
     print("💬 Enter a question (type 'quit' or 'exit' to stop)")
     while True:
         raw = input("Question: ").strip()
@@ -61,26 +61,33 @@ def interactive_loop():
         if not raw:
             continue
 
-        _print_results(ask_question(raw))
+        ask_question_interactive(raw, use_cache=use_cache)
+
+def ask_question_interactive(question: str, use_cache=True):
+    agent = AgenticSQLPipeline_V2()
+    agent.run(question, use_cache=use_cache)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ask the Agentic SQL pipeline for answers")
     parser.add_argument("-q", "--question", help="One-off question to run")
     parser.add_argument("-t", "--test", action="store_true", help="Run the built-in test questions")
+    parser.add_argument("-nc", "--no-cache", action="store_true", help="Bypass the semantic cache")
     args = parser.parse_args()
+
+    agent = AgenticSQLPipeline_V2()
 
     if args.question:
         print(f"📝 Question: {args.question}")
-        _print_results(ask_question(args.question))
+        agent.run(args.question, use_cache=not args.no_cache)
     elif args.test:
         print("🧪 Running test questions...\n")
         for qm in DEFAULT_TEST_QUESTIONS:
             print(f"{'='*60}\nQuestion: {qm}\n{'='*60}")
-            _print_results(ask_question(qm))
+            agent.run(qm, use_cache=not args.no_cache)
             print()
     else:
-        interactive_loop()
+        interactive_loop(use_cache=not args.no_cache)
 
 
 if __name__ == "__main__":
