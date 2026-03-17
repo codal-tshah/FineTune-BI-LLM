@@ -1,53 +1,557 @@
 [
     {
-        "question": "How many flights are there?",
-        "sql": "SELECT count(*) FROM postgres_air.flight",
-        "sample_results": [
+        "question": "How many flights have a range of more than 5000 miles?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.flight INNER JOIN postgres_air.aircraft ON flight.aircraft_code = aircraft.code WHERE aircraft.range > 5000",
+        "preview": [
             {
-                "count": 683178
+                "count": 449308
             }
         ]
     },
     {
-        "question": "What is the total price of all bookings?",
-        "sql": "SELECT sum(price) FROM postgres_air.booking",
-        "sample_results": [
+        "question": "What is the total number of passengers flying to or from London airport?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.passenger INNER JOIN postgres_air.flight ON passenger.booking_id = flight.flight_id WHERE flight.departure_airport = 'LHR' OR flight.arrival_airport = 'LHR'",
+        "preview": [
             {
-                "sum": 5643232834.35
+                "count": 5138
             }
         ]
     },
     {
-        "question": "How many flights are not scheduled yet?",
-        "sql": "SELECT count(*) FROM postgres_air.flight WHERE status = 'scheduled'",
-        "sample_results": [
+        "question": "Which accounts have more than 10 flights booked?",
+        "sql": "SELECT account.account_id, COUNT(*) FROM postgres_air.account INNER JOIN postgres_air.booking ON account.account_id = booking.account_id GROUP BY account.account_id HAVING COUNT(*) > 10",
+        "preview": [
             {
-                "count": 0
+                "account_id": 589947,
+                "count": 13
+            },
+            {
+                "account_id": 363644,
+                "count": 11
             }
         ]
     },
     {
-        "question": "What is the average range of aircrafts?",
-        "sql": "SELECT avg(range) FROM postgres_air.aircraft",
-        "sample_results": [
+        "question": "What is the average speed of all flights?",
+        "sql": "SELECT AVG(aircraft.velocity) FROM postgres_air.flight INNER JOIN postgres_air.aircraft ON flight.aircraft_code = aircraft.code",
+        "preview": [
             {
-                "avg": 7600.0
+                "avg": 836.5707912140028
             }
         ]
     },
     {
-        "question": "How many different frequent flyer levels do we have?",
-        "sql": "SELECT count(distinct level) FROM postgres_air.frequent_flyer",
-        "sample_results": [
+        "question": "Who are the passengers who have booked flights with boarding time before 10:00 AM?",
+        "sql": "SELECT passenger.* FROM postgres_air.passenger INNER JOIN postgres_air.boarding_pass ON passenger.passenger_id = boarding_pass.passenger_id WHERE EXTRACT(HOUR FROM boarding_pass.boarding_time) < 10",
+        "preview": [
+            {
+                "passenger_id": 825831,
+                "booking_id": 304422,
+                "booking_ref": "XAHH12",
+                "passenger_no": "NaN",
+                "first_name": "JOEY",
+                "last_name": "STANLEY",
+                "account_id": 174862.0,
+                "update_ts": "2024-04-15T04:31:47.001654+05:30",
+                "age": 92
+            },
+            {
+                "passenger_id": 379045,
+                "booking_id": 145859,
+                "booking_ref": "EY2E12",
+                "passenger_no": "NaN",
+                "first_name": "LEILANI",
+                "last_name": "LAWRENCE",
+                "account_id": "NaN",
+                "update_ts": "2024-04-17T06:36:34.767840+05:30",
+                "age": 48
+            }
+        ]
+    },
+    {
+        "question": "Which flights have more than 2 passengers?",
+        "sql": "SELECT flight.*, COUNT(*) FROM postgres_air.flight INNER JOIN postgres_air.passenger ON flight.flight_id = passenger.booking_id GROUP BY flight.flight_id HAVING COUNT(*) > 2",
+        "preview": [
+            {
+                "flight_id": 3,
+                "flight_no": "76",
+                "scheduled_departure": "2024-05-29T10:10:00+05:30",
+                "scheduled_arrival": "2024-05-29T20:00:00+05:30",
+                "departure_airport": "AMS",
+                "arrival_airport": "HAV",
+                "status": "On schedule",
+                "aircraft_code": "319",
+                "actual_departure": "2024-05-29T10:14:36.120000+05:30",
+                "actual_arrival": "2024-05-29T19:59:32.280000+05:30",
+                "update_ts": "2024-03-29T11:10:00+05:30",
+                "count": 3
+            },
+            {
+                "flight_id": 4,
+                "flight_no": "76",
+                "scheduled_departure": "2024-05-28T17:35:00+05:30",
+                "scheduled_arrival": "2024-05-29T03:25:00+05:30",
+                "departure_airport": "AMS",
+                "arrival_airport": "HAV",
+                "status": "Delayed",
+                "aircraft_code": "319",
+                "actual_departure": "2024-05-28T19:04:47.040000+05:30",
+                "actual_arrival": "2024-05-29T03:17:51.600000+05:30",
+                "update_ts": "2024-05-28T19:03:31.726489+05:30",
+                "count": 3
+            }
+        ]
+    },
+    {
+        "question": "What are the top 3 busiest airports?",
+        "sql": "SELECT airport.*, COUNT(*) FROM postgres_air.airport INNER JOIN postgres_air.flight ON airport.airport_code = flight.departure_airport OR airport.airport_code = flight.arrival_airport GROUP BY airport.airport_code ORDER BY COUNT(*) DESC LIMIT 3",
+        "preview": [
+            {
+                "airport_code": "ATL",
+                "airport_name": "Hartsfield Jackson Atlanta International Airport",
+                "city": "ATLANTA",
+                "airport_tz": "America/New_York",
+                "continent": "NA",
+                "iso_country": "US",
+                "iso_region": "US-GA",
+                "intnl": false,
+                "update_ts": null,
+                "count": 29640
+            },
+            {
+                "airport_code": "ORD",
+                "airport_name": "Chicago O'Hare International Airport",
+                "city": "CHICAGO",
+                "airport_tz": "America/Chicago",
+                "continent": "NA",
+                "iso_country": "US",
+                "iso_region": "US-IL",
+                "intnl": true,
+                "update_ts": null,
+                "count": 25844
+            }
+        ]
+    },
+    {
+        "question": "What is the total number of flights per aircraft model?",
+        "sql": "SELECT a.model, COUNT(f.flight_id) AS flight_count FROM postgres_air.aircraft a JOIN postgres_air.flight f ON a.code = f.aircraft_code GROUP BY a.model;",
+        "preview": [
+            {
+                "model": "Airbus 330",
+                "flight_count": 69165
+            },
+            {
+                "model": "Airbus 340",
+                "flight_count": 3373
+            }
+        ]
+    },
+    {
+        "question": "Who are the frequent flyers with more than 500 points?",
+        "sql": "SELECT ff.frequent_flyer_id, SUM(ff.award_points) AS total_points FROM postgres_air.frequent_flyer ff GROUP BY ff.frequent_flyer_id HAVING SUM(ff.award_points) > 500;",
+        "preview": [
+            {
+                "frequent_flyer_id": 1,
+                "total_points": 17679
+            },
+            {
+                "frequent_flyer_id": 2,
+                "total_points": 33995
+            }
+        ]
+    },
+    {
+        "question": "What is the average booking price for each frequent flyer level?",
+        "sql": "SELECT f.level, AVG(b.price) AS avg_price FROM postgres_air.frequent_flyer f JOIN postgres_air.account a ON f.frequent_flyer_id = a.frequent_flyer_id JOIN postgres_air.booking b ON a.account_id = b.account_id GROUP BY f.level;",
+        "preview": [
+            {
+                "level": 1,
+                "avg_price": 999.8016775768975
+            },
+            {
+                "level": 2,
+                "avg_price": 1001.1922831989306
+            }
+        ]
+    },
+    {
+        "question": "What is the total number of international flights per airport?",
+        "sql": "SELECT ap.airport_code, COUNT(f.flight_id) AS flight_count FROM postgres_air.airport ap JOIN postgres_air.flight f ON ap.airport_code = f.departure_airport OR ap.airport_code = f.arrival_airport WHERE ap.intnl IS TRUE GROUP BY ap.airport_code;",
+        "preview": [
+            {
+                "airport_code": "ABJ",
+                "flight_count": 832
+            },
+            {
+                "airport_code": "ABV",
+                "flight_count": 2288
+            }
+        ]
+    },
+    {
+        "question": "What is the earliest and latest scheduled departure time for each airport?",
+        "sql": "SELECT ap.airport_name, MIN(f.scheduled_departure) AS earliest_departure, MAX(f.scheduled_arrival) AS latest_arrival FROM postgres_air.airport ap JOIN postgres_air.flight f ON ap.airport_code = f.departure_airport GROUP BY ap.airport_name;",
+        "preview": [
+            {
+                "airport_name": "Aachen-Merzbr\u00c3\u00bcck Airport",
+                "earliest_departure": "2024-05-27T11:35:00+05:30",
+                "latest_arrival": "2024-11-23T15:10:00+05:30"
+            },
+            {
+                "airport_name": "Abdul Rachman Saleh Airport",
+                "earliest_departure": "2024-05-28T15:20:00+05:30",
+                "latest_arrival": "2024-11-24T15:55:00+05:30"
+            }
+        ]
+    },
+    {
+        "question": "What is the total number of flights that have been booked for each account?",
+        "sql": "SELECT a.account_id, COUNT(b.booking_ref) AS flight_count FROM postgres_air.account a LEFT JOIN postgres_air.booking b ON a.account_id = b.account_id GROUP BY a.account_id;",
+        "preview": [
+            {
+                "account_id": 174416,
+                "flight_count": 10
+            },
+            {
+                "account_id": 96868,
+                "flight_count": 4
+            }
+        ]
+    },
+    {
+        "question": "What are the top 3 airports with the most flights?",
+        "sql": "SELECT a.airport_name, COUNT(*) AS flight_count FROM postgres_air.flight f JOIN postgres_air.airport a ON f.arrival_airport = a.airport_code GROUP BY a.airport_name ORDER BY flight_count DESC LIMIT 3",
+        "preview": [
+            {
+                "airport_name": "Hartsfield Jackson Atlanta International Airport",
+                "flight_count": 14820
+            },
+            {
+                "airport_name": "Chicago O'Hare International Airport",
+                "flight_count": 12922
+            }
+        ]
+    },
+    {
+        "question": "Which frequent flyer has the most bookings?",
+        "sql": "SELECT f.frequent_flyer_id, COUNT(*) AS booking_count FROM postgres_air.booking b JOIN postgres_air.account a ON b.account_id = a.account_id JOIN postgres_air.frequent_flyer f ON a.frequent_flyer_id = f.frequent_flyer_id GROUP BY f.frequent_flyer_id ORDER BY booking_count DESC LIMIT 1",
+        "preview": [
+            {
+                "frequent_flyer_id": 60681,
+                "booking_count": 22
+            }
+        ]
+    },
+    {
+        "question": "What is the average flight time for all flights?",
+        "sql": "SELECT AVG(EXTRACT(EPOCH FROM (actual_arrival - scheduled_departure))/60) AS avg_flight_time FROM postgres_air.flight",
+        "preview": [
+            {
+                "avg_flight_time": 179.99667284417998
+            }
+        ]
+    },
+    {
+        "question": "Which model of aircraft has the longest range?",
+        "sql": "SELECT a.model, a.range FROM postgres_air.aircraft a ORDER BY a.range DESC LIMIT 1",
+        "preview": [
+            {
+                "model": "Airbus 380",
+                "range": 16100.0
+            }
+        ]
+    },
+    {
+        "question": "What is the most common phone type among frequent flyers?",
+        "sql": "SELECT p.phone_type, COUNT(*) AS count FROM postgres_air.frequent_flyer f JOIN postgres_air.account a ON f.frequent_flyer_id = a.frequent_flyer_id JOIN postgres_air.phone p ON a.account_id = p.account_id GROUP BY p.phone_type ORDER BY count DESC LIMIT 1",
+        "preview": [
+            {
+                "phone_type": "mobile",
+                "count": 128346
+            }
+        ]
+    },
+    {
+        "question": "What is the most frequent day of week for bookings?",
+        "sql": "SELECT TO_CHAR(b.update_ts, 'Day') AS day_of_week, COUNT(*) as count FROM postgres_air.booking b GROUP BY day_of_week ORDER BY count DESC LIMIT 1",
+        "preview": [
+            {
+                "day_of_week": "Tuesday  ",
+                "count": 901462
+            }
+        ]
+    },
+    {
+        "question": "What is the average price of bookings?",
+        "sql": "SELECT AVG(b.price) AS avg_price FROM postgres_air.booking b",
+        "preview": [
+            {
+                "avg_price": 1000.0029831128207
+            }
+        ]
+    },
+    {
+        "question": "List all frequent flyer ids with their corresponding names.",
+        "sql": "SELECT frequent_flyer_id, first_name, last_name FROM postgres_air.frequent_flyer;",
+        "preview": [
+            {
+                "frequent_flyer_id": 2064,
+                "first_name": "EVA",
+                "last_name": "AMOS"
+            },
+            {
+                "frequent_flyer_id": 86682,
+                "first_name": "KAI",
+                "last_name": "HYDE"
+            }
+        ]
+    },
+    {
+        "question": "Find the number of bookings for each flight using booking_leg table.",
+        "sql": "SELECT COUNT(*) as num_bookings, flight_id FROM postgres_air.booking_leg GROUP BY flight_id;",
+        "preview": [
+            {
+                "num_bookings": 25,
+                "flight_id": 1
+            },
+            {
+                "num_bookings": 52,
+                "flight_id": 2
+            }
+        ]
+    },
+    {
+        "question": "List all airports with more than 5000 miles of range in the 'continent' Europe.",
+        "sql": "SELECT airport_name, airport_tz, continent FROM postgres_air.airport WHERE iso_country = 'Europe';",
+        "preview": []
+    },
+    {
+        "question": "List all frequent flyers with at least 10 account records linked to them.",
+        "sql": "SELECT f.frequent_flyer_id, COUNT(a.account_id) as num_accounts FROM postgres_air.frequent_flyer f JOIN postgres_air.account a ON f.frequent_flyer_id = a.frequent_flyer_id GROUP BY f.frequent_flyer_id HAVING COUNT(a.account_id) >= 10;",
+        "preview": []
+    },
+    {
+        "question": "List the top 5 frequent flyers with most bookings.",
+        "sql": "SELECT f.first_name, f.last_name, COUNT(b.booking_id) as num_bookings FROM postgres_air.frequent_flyer f JOIN postgres_air.account a ON f.frequent_flyer_id = a.frequent_flyer_id JOIN postgres_air.booking b ON a.account_id = b.account_id GROUP BY f.first_name, f.last_name ORDER BY num_bookings DESC LIMIT 5;",
+        "preview": [
+            {
+                "first_name": "NOAH",
+                "last_name": "SMITH",
+                "num_bookings": 11291
+            },
+            {
+                "first_name": "SEBASTIAN",
+                "last_name": "JONES",
+                "num_bookings": 389
+            }
+        ]
+    },
+    {
+        "question": "List all the different types of phone linked to an account along with their count.",
+        "sql": "SELECT p.phone_type, COUNT(p.phone) as num_phones FROM postgres_air.account a JOIN postgres_air.phone p ON a.account_id = p.account_id GROUP BY p.phone_type;",
+        "preview": [
+            {
+                "phone_type": "home",
+                "num_phones": 64333
+            },
+            {
+                "phone_type": "mobile",
+                "num_phones": 514204
+            }
+        ]
+    },
+    {
+        "question": "List all aircraft models with a range of more than 4000 miles.",
+        "sql": "SELECT model, range FROM postgres_air.aircraft WHERE range > 4000;",
+        "preview": [
+            {
+                "model": "Airbus 340",
+                "range": 12000.0
+            },
+            {
+                "model": "Airbus 380",
+                "range": 16100.0
+            }
+        ]
+    },
+    {
+        "question": "What are the names of the passengers who have a boarding pass for flight with leg number 2?",
+        "sql": "SELECT p.first_name, p.last_name FROM postgres_air.passenger as p INNER JOIN postgres_air.boarding_pass as bp ON p.passenger_id = bp.passenger_id INNER JOIN postgres_air.booking_leg as bl ON bp.booking_leg_id = bl.booking_leg_id WHERE bl.leg_num = 2;",
+        "preview": [
+            {
+                "first_name": "NATHAN",
+                "last_name": "COHEN"
+            },
+            {
+                "first_name": "OLIVIA",
+                "last_name": "THORNE"
+            }
+        ]
+    },
+    {
+        "question": "What are the top 3 airports with the most flights?",
+        "sql": "SELECT a.airport_name, COUNT(f.flight_no) as flight_count FROM postgres_air.airport as a INNER JOIN postgres_air.flight as f ON a.airport_code = f.departure_airport OR a.airport_code = f.arrival_airport GROUP BY a.airport_name ORDER BY flight_count DESC LIMIT 3;",
+        "preview": [
+            {
+                "airport_name": "Hartsfield Jackson Atlanta International Airport",
+                "flight_count": 29640
+            },
+            {
+                "airport_name": "Chicago O'Hare International Airport",
+                "flight_count": 25844
+            }
+        ]
+    },
+    {
+        "question": "What is the total number of flights per aircraft model?",
+        "sql": "SELECT a.model, COUNT(f.flight_id) as flight_count FROM postgres_air.aircraft as a INNER JOIN postgres_air.flight as f ON a.code = f.aircraft_code GROUP BY a.model;",
+        "preview": [
+            {
+                "model": "Airbus 330",
+                "flight_count": 69165
+            },
+            {
+                "model": "Airbus 340",
+                "flight_count": 3373
+            }
+        ]
+    },
+    {
+        "question": "How many flights have a range of more than 5000 miles?",
+        "sql": "SELECT COUNT(*) FROM postgres_air.flight as f INNER JOIN postgres_air.aircraft as a ON f.aircraft_code = a.code WHERE a.range > 5000;",
+        "preview": [
+            {
+                "count": 449308
+            }
+        ]
+    },
+    {
+        "question": "What is the most frequent day of week for bookings?",
+        "sql": "SELECT EXTRACT(DOW FROM b.update_ts) as day_of_week, COUNT(*) as count FROM postgres_air.booking as b GROUP BY day_of_week ORDER BY count DESC LIMIT 1;",
+        "preview": [
+            {
+                "day_of_week": 2.0,
+                "count": 901462
+            }
+        ]
+    },
+    {
+        "question": "Which frequent flyer has the most bookings?",
+        "sql": "SELECT f.frequent_flyer_id, COUNT(b.booking_id) as booking_count FROM postgres_air.frequent_flyer as f INNER JOIN postgres_air.account as a ON f.frequent_flyer_id = a.frequent_flyer_id INNER JOIN postgres_air.booking as b ON a.account_id = b.account_id GROUP BY f.frequent_flyer_id ORDER BY booking_count DESC LIMIT 1;",
+        "preview": [
+            {
+                "frequent_flyer_id": 60681,
+                "booking_count": 22
+            }
+        ]
+    },
+    {
+        "question": "Which accounts have more than 10 flights booked?",
+        "sql": "SELECT a.account_id, COUNT(b.booking_id) as booking_count FROM postgres_air.account as a INNER JOIN postgres_air.booking as b ON a.account_id = b.account_id GROUP BY a.account_id HAVING COUNT(b.booking_id) > 10;",
+        "preview": [
+            {
+                "account_id": 549333,
+                "booking_count": 12
+            },
+            {
+                "account_id": 589947,
+                "booking_count": 13
+            }
+        ]
+    },
+    {
+        "question": "What is the most common phone type among frequent flyers?",
+        "sql": "SELECT p.phone_type, COUNT(*) as count FROM postgres_air.frequent_flyer as f INNER JOIN postgres_air.account as a ON f.frequent_flyer_id = a.frequent_flyer_id INNER JOIN postgres_air.phone as p ON a.account_id = p.account_id GROUP BY p.phone_type ORDER BY count DESC LIMIT 1;",
+        "preview": [
+            {
+                "phone_type": "mobile",
+                "count": 128346
+            }
+        ]
+    },
+    {
+        "question": "What is the average flight time for all flights?",
+        "sql": "SELECT AVG(EXTRACT(EPOCH FROM (f.scheduled_arrival - f.scheduled_departure))/60) as avg_time FROM postgres_air.flight as f;",
+        "preview": [
+            {
+                "avg_time": 182.8818111824444
+            }
+        ]
+    },
+    {
+        "question": "How many different frequent flyer levels exist in the system?",
+        "sql": "SELECT COUNT(DISTINCT level) FROM postgres_air.frequent_flyer",
+        "preview": [
             {
                 "count": 4
             }
         ]
     },
     {
-        "question": "What is the most common phone type among our accounts?",
-        "sql": "SELECT phone_type, count(*) FROM postgres_air.phone GROUP BY phone_type ORDER BY count DESC LIMIT 1",
-        "sample_results": [
+        "question": "What are the top 3 airports with the most flights scheduled per day?",
+        "sql": "SELECT departure_airport, count(*) as flight_count FROM postgres_air.flight WHERE status='scheduled' GROUP BY departure_airport ORDER BY flight_count DESC LIMIT 3",
+        "preview": []
+    },
+    {
+        "question": "What is the total number of flights per aircraft model?",
+        "sql": "SELECT a.model, COUNT(*) as flight_count FROM postgres_air.flight f JOIN postgres_air.aircraft a ON f.aircraft_code = a.code GROUP BY a.model",
+        "preview": [
+            {
+                "model": "Airbus 330",
+                "flight_count": 69165
+            },
+            {
+                "model": "Airbus 340",
+                "flight_count": 3373
+            }
+        ]
+    },
+    {
+        "question": "Find the number of bookings for each flight using booking_leg table.",
+        "sql": "SELECT fl.flight_id, COUNT(*) as booking_count FROM postgres_air.booking_leg bl JOIN postgres_air.flight fl ON bl.flight_id = fl.flight_id GROUP BY fl.flight_id",
+        "preview": [
+            {
+                "flight_id": 1,
+                "booking_count": 25
+            },
+            {
+                "flight_id": 2,
+                "booking_count": 52
+            }
+        ]
+    },
+    {
+        "question": "Which frequent flyer has the most bookings?",
+        "sql": "SELECT f.frequent_flyer_id, COUNT(*) as booking_count FROM postgres_air.account a JOIN postgres_air.booking b ON a.account_id = b.account_id JOIN postgres_air.frequent_flyer f ON a.frequent_flyer_id = f.frequent_flyer_id GROUP BY f.frequent_flyer_id ORDER BY booking_count DESC LIMIT 1",
+        "preview": [
+            {
+                "frequent_flyer_id": 60681,
+                "booking_count": 22
+            }
+        ]
+    },
+    {
+        "question": "What is the average booking price for each frequent flyer level?",
+        "sql": "SELECT f.level, AVG(b.price) as avg_price FROM postgres_air.booking b JOIN postgres_air.account a ON b.account_id = a.account_id JOIN postgres_air.frequent_flyer f ON a.frequent_flyer_id = f.frequent_flyer_id GROUP BY f.level",
+        "preview": [
+            {
+                "level": 1,
+                "avg_price": 999.8016775768975
+            },
+            {
+                "level": 2,
+                "avg_price": 1001.1922831989306
+            }
+        ]
+    },
+    {
+        "question": "List all the different types of phone linked to an account along with their count.",
+        "sql": "SELECT p.phone_type, COUNT(*) as count FROM postgres_air.account a JOIN postgres_air.phone p ON a.account_id = p.account_id GROUP BY p.phone_type",
+        "preview": [
+            {
+                "phone_type": "home",
+                "count": 64333
+            },
             {
                 "phone_type": "mobile",
                 "count": 514204
@@ -55,207 +559,33 @@
         ]
     },
     {
-        "question": "What is the earliest flight scheduled departure time?",
-        "sql": "SELECT min(scheduled_departure) FROM postgres_air.flight",
-        "sample_results": [
+        "question": "What is the earliest and latest scheduled departure time for each airport?",
+        "sql": "SELECT arrival_airport, MIN(scheduled_departure) as earliest, MAX(scheduled_arrival) as latest FROM postgres_air.flight GROUP BY arrival_airport",
+        "preview": [
             {
-                "min": "2024-05-27T00:55:00+05:30"
-            }
-        ]
-    },
-    {
-        "question": "Which account has the longest name (first and last combined)?",
-        "sql": "SELECT first_name, last_name FROM postgres_air.account ORDER BY length(concat(first_name,last_name)) DESC LIMIT 1",
-        "sample_results": [
-            {
-                "first_name": "NATHANIEL",
-                "last_name": "SAN FRANCISCO"
-            }
-        ]
-    },
-    {
-        "question": "Who are our frequent flyers with more than two award points?",
-        "sql": "SELECT first_name, last_name FROM postgres_air.frequent_flyer WHERE award_points > 2",
-        "sample_results": [
-            {
-                "first_name": "EVA",
-                "last_name": "AMOS"
+                "arrival_airport": "AAH",
+                "earliest": "2024-05-27T13:20:00+05:30",
+                "latest": "2024-11-23T16:50:00+05:30"
             },
             {
-                "first_name": "KAI",
-                "last_name": "HYDE"
-            },
-            {
-                "first_name": "GAEL",
-                "last_name": "JAN"
-            },
-            {
-                "first_name": "TROY",
-                "last_name": "JOY"
-            },
-            {
-                "first_name": "IAN",
-                "last_name": "CARR"
+                "arrival_airport": "ABJ",
+                "earliest": "2024-05-27T17:35:00+05:30",
+                "latest": "2024-11-24T21:35:00+05:30"
             }
         ]
     },
     {
-        "question": "How many flights have been scheduled in total?",
-        "sql": "SELECT COUNT(*) FROM postgres_air.flight",
-        "sample_results": [
-            {
-                "count": 683178
-            }
-        ]
+        "question": "Who are the frequent flyers with more than 500 points?",
+        "sql": "SELECT f.frequent_flyer_id, COUNT(*) as point FROM postgres_air.frequent_flyer f JOIN postgres_air.account a ON f.frequent_flyer_id = a.frequent_flyer_id GROUP BY f.frequent_flyer_id HAVING COUNT(a.account_id) > 500",
+        "preview": []
     },
     {
-        "question": "What is the total number of frequent flyer accounts?",
-        "sql": "SELECT COUNT(*) FROM postgres_air.frequent_flyer",
-        "sample_results": [
+        "question": "What is the most frequent day of week for bookings?",
+        "sql": "SELECT to_char(b.update_ts, 'Day') as day, COUNT(*) as count FROM postgres_air.booking b GROUP BY day ORDER BY count DESC LIMIT 1",
+        "preview": [
             {
-                "count": 128346
-            }
-        ]
-    },
-    {
-        "question": "How many different aircraft codes are there in the system?",
-        "sql": "SELECT COUNT(DISTINCT aircraft_code) FROM postgres_air.flight",
-        "sample_results": [
-            {
-                "count": 12
-            }
-        ]
-    },
-    {
-        "question": "What is the average flight range for all aircrafts?",
-        "sql": "SELECT AVG(range) FROM postgres_air.aircraft",
-        "sample_results": [
-            {
-                "avg": 7600.0
-            }
-        ]
-    },
-    {
-        "question": "Which flight had the longest scheduled departure time?",
-        "sql": "SELECT flight_no FROM postgres_air.flight ORDER BY (scheduled_departure - scheduled_arrival) DESC LIMIT 1",
-        "sample_results": [
-            {
-                "flight_no": "3088"
-            }
-        ]
-    },
-    {
-        "question": "Who are the frequent flyers with more than one award points?",
-        "sql": "SELECT first_name, last_name FROM postgres_air.frequent_flyer f JOIN (SELECT frequent_flyer_id FROM postgres_air.frequent_flyer WHERE award_points > 1) s ON f.frequent_flyer_id = s.frequent_flyer_id",
-        "sample_results": [
-            {
-                "first_name": "EVA",
-                "last_name": "AMOS"
-            },
-            {
-                "first_name": "KAI",
-                "last_name": "HYDE"
-            },
-            {
-                "first_name": "GAEL",
-                "last_name": "JAN"
-            },
-            {
-                "first_name": "TROY",
-                "last_name": "JOY"
-            },
-            {
-                "first_name": "IAN",
-                "last_name": "CARR"
-            }
-        ]
-    },
-    {
-        "question": "What is the average price of all bookings?",
-        "sql": "SELECT AVG(price) FROM postgres_air.booking",
-        "sample_results": [
-            {
-                "avg": 1000.0029831128207
-            }
-        ]
-    },
-    {
-        "question": "What is the total number of flights scheduled?",
-        "sql": "SELECT COUNT(*) FROM postgres_air.flight WHERE status = 'scheduled'",
-        "sample_results": [
-            {
-                "count": 0
-            }
-        ]
-    },
-    {
-        "question": "How many flights are there in total?",
-        "sql": "SELECT COUNT(*) FROM postgres_air.flight",
-        "sample_results": [
-            {
-                "count": 683178
-            }
-        ]
-    },
-    {
-        "question": "What is the average range of all aircrafts?",
-        "sql": "SELECT AVG(range) FROM postgres_air.aircraft",
-        "sample_results": [
-            {
-                "avg": 7600.0
-            }
-        ]
-    },
-    {
-        "question": "How many passengers are there?",
-        "sql": "SELECT COUNT(*) FROM postgres_air.passenger",
-        "sample_results": [
-            {
-                "count": 21140719
-            }
-        ]
-    },
-    {
-        "question": "How many frequent flyer accounts do we have?",
-        "sql": "SELECT COUNT(*) FROM postgres_air.frequent_flyer",
-        "sample_results": [
-            {
-                "count": 128346
-            }
-        ]
-    },
-    {
-        "question": "How many flights are scheduled yet?",
-        "sql": "SELECT COUNT(*) FROM postgres_air.flight WHERE status = 'scheduled'",
-        "sample_results": [
-            {
-                "count": 0
-            }
-        ]
-    },
-    {
-        "question": "Who are the frequent flyers with more than one award point?",
-        "sql": "SELECT first_name, last_name FROM postgres_air.frequent_flyer WHERE award_points > 1",
-        "sample_results": [
-            {
-                "first_name": "EVA",
-                "last_name": "AMOS"
-            },
-            {
-                "first_name": "KAI",
-                "last_name": "HYDE"
-            },
-            {
-                "first_name": "GAEL",
-                "last_name": "JAN"
-            },
-            {
-                "first_name": "TROY",
-                "last_name": "JOY"
-            },
-            {
-                "first_name": "IAN",
-                "last_name": "CARR"
+                "day": "Tuesday  ",
+                "count": 901462
             }
         ]
     }
