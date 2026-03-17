@@ -100,7 +100,10 @@ class MyVanna(ChromaDB_VectorStore, Ollama):
         # we do a slightly smarter check for key tokens.
         
         best_match = results[0]
-        match_q = best_match['question'].lower()
+        if not best_match or not isinstance(best_match, dict):
+            return None, None
+            
+        match_q = best_match.get('question', '').lower()
         query_q = question.lower()
         
         # Normalize: Remove common SQL-NL "fluff" words to check for core intent

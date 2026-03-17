@@ -163,6 +163,42 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 - **Alias Consistency Enforcement**: The Pre-Validator automatically fixes mismatched table/alias references (e.g., `flight.id` → `f.id`), preventing "missing FROM-clause" errors.
 - **Cache Bypass**: The `run()` method now accepts `use_cache=False` to force re-generation if the semantic cache contains poisoned data.
 
+## 20. Enhanced Output Formatter & PgAdmin Readiness
+
+- **Problem**: Natural Language interfaces often return escaped SQL (e.g., `\n` characters) which is hard to test in database IDEs like PgAdmin.
+- **Solution**: Implemented an enhanced reporting block in `agent_pipeline.py`:
+  - **Raw SQL Block**: The terminal now prints a clean ` ```sql ` block containing the exact generated query.
+  - **latest_query.sql Export**: Every successful run automatically overwrites a file named `latest_query.sql` in the root directory. Users can open this file and find the current query ready for execution.
+  - **Aligned Results**: Final results are displayed using Pandas' `.to_string()`, ensuring table alignment in the terminal.
+
+## 21. Smart Table Protection (Travel-Math Logic)
+
+- **Problem**: Fixed "Domain Purges" were sometimes too aggressive, removing the `flight` table for a question like "Which passengers have the most miles?" because the word "flight" wasn't present.
+- **Solution**: Implemented a **Schema-Driven Protection Layer**:
+  1. **Keyword-to-Schema Mapping**: The system scans the question keywords against the actual column names of every table.
+  2. **Semantic Metric Protection**: Created a whitelist of "Travel-Math" terms (`mile`, `distance`, `velocity`, `duration`, `speed`).
+  3. **Conditional Purge**: A table (like `flight`) is only purged if it's considered noise AND it contains no columns relevant to the user's specific query metrics.
+
+## 22. Character Normalization Layer
+
+- **Problem**: Certain LLM quantizations (especially 4-bit) occasionally output "Full-Width" characters like `＝` (Unicode `\uff1d`) instead of standard ASCII `=` which causes PostgreSQL syntax errors.
+- **Solution**: Added a normalization pass in the SQL Agent that replaces these hallucinated characters with their standard SQL equivalents before the query reaches the validator.
+
+## 23. Batch-Based Synthetic Generation & Complexity Rotation
+
+- **Problem**: Generating 100+ queries in a single LLM call lead to "Capping" where the LLM would stop at ~20-30 queries due to context window or output token limits.
+- **Solution**:
+  - **Batching**: Fixed the `synthetic_training_generator.py` to work in batches of 10.
+  - **Complexity Rotation**: Each batch cycles through different strategies (**BASIC, JOINS, AGGREGATES, ADVANCED**). This ensures the RAG knowledge base is balanced and not dominated by simple queries.
+  - **Timedelta Serialization**: Added support for `pd.Timedelta`, `pd.NA`, and `pd.NaT` in the `EnhancedJSONEncoder` to prevent crashes during the training of travel-duration queries.
+
+## 24. Post-Processing SQL Fixes (Negative Lookbehinds)
+
+- **Problem**: Simple regex qualification was turning `AS airport` into `AS "public"."airport"`, which is illegal syntax for PostgreSQL aliases.
+- **Solution**: 
+  - **Negative Lookbehind**: Updated `_ensure_schema_qualified` to use `(?<!(?i:AS)\s)`, ensuring it never qualifies a table name if it's acting as an alias.
+  - **Alias Safety Net**: Added a step in `_validate_sql` to catch and strip any `AS "schema"."table"` hallucinations that the LLM produces directly.
+
 ## Performance Notes (Mac 16GB RAM)
 
 - **Sequential Nature**: Latency is cumulative (sum of 4 LLM calls). Parallelism is not possible as agents depend on prior output.
@@ -173,3 +209,38 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 1. **6.7B Accuracy**: Hallucinations on complex queries still occur; SQL Pre-Validator and Schema Pruning catch ~90%.
 2. **PostgreSQL focus**: MySQL/SQLite support exists but is secondary.
 3. **No multi-turn context**: Each question is treated as a new session.
+## 25. Off-Topic Rejection Guard
+
+- **Problem**: Small models often try to "force" a SQL query for general conversation (e.g., "hi", "how are you"), leading to hallucinated queries on random tables.
+- **Solution**: Implemented a semantic guard layer in `agent_pipeline.py` using `_is_off_topic()`:
+  - The Architect model performs a fast binary check against the schema summary.
+  - If a question is identified as `OFF_TOPIC`, the pipeline halts and returns a helpful rejection message listing the database's actual capabilities.
+
+## 26. Hex Healing & Corruption Recovery (Pre-Validator V3)
+
+- **Problem**: Quantized models occasionally inject internal memory hex blocks into column names (e.g., `flight67e1a0f5_id` instead of `flight_id`). Simple stripping often left "hanging dots" (`f. = bl.`), causing syntax errors.
+- **Solution**:
+  - **Heal Pass**: Scans for identifiers with long hex strings (12+ chars) and "heals" them by removing the hex part while preserving the base word/underscore structure.
+  - **Syntax Repair**: Added regex pass to detect and fix broken join syntax like `f. = bl.` by either guessing the primary key prefix or removing the trailing dot before operators.
+
+## 27. Human-Readability Enforcement
+
+- **Problem**: The **Parsimony Rule** (use minimum tables) often resulted in queries returning only IDs (e.g., `account_id`) because joining the `account` table for `first_name` was technically "unnecessary" for the count math.
+- **Solution**:
+  - **Architect Rule #9**: Instructs the planner to mandatory include descriptive columns (names, titles, models) in the plan when listing or grouping entities.
+  - **SQL Engineer Mandate**: Added a high-level instruction that results with only IDs are considered poor quality, forcing the model to perform the descriptive joins.
+
+## 28. Strategic Fallback
+
+- **Problem**: Blindly falling back to "primary tables" when no keywords matched often led to hallucinations for off-topic questions.
+- **Solution**: The Architect now only triggers the primary table fallback if the question is first confirmed as `AUTHORIZED` (relevant to DB) but has hazy keyword matching.
+
+## 29. Multi-threaded Synthetic Data Generation
+
+- **Problem**: Generating 100+ training examples was slow due to sequential LLM calls.
+- **Solution**: Updated `synthetic_training_generator.py` to use `ThreadPoolExecutor` with 4 workers. This allows multiple batches to be processed in parallel, reducing the total generation time by ~70%.
+
+## 30. Resilient Semantic Cache & Pipeline
+
+- **Problem**: Null results or string-type leakage from ChromaDB/Ollama caused `NoneType` and `AttributeError` crashes in the pipeline.
+- **Solution**: Added robust type-checking in `connections.py` (for `best_match`) and `agent_pipeline.py` (for `training_data` items) to skip malformed entries instead of crashing.
