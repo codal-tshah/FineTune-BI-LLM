@@ -4,15 +4,13 @@ A production-ready Business Intelligence toolkit that turns natural language int
 
 ## 🎯 Key Features
 
-- **Multi-Agent Classifier → Planner → SQL → Validator pipeline**: Classifier narrows schema focus; Planner designs the query strategy; SQL Agent generates; Validator executes and self-corrects.
-- **SQL Pre-Validation Layer**: Code-level validator that fuzzy-matches misspelled table names (e.g., `boardingb` → `boarding_pass`) and auto-corrects hallucinated columns before execution.
-- **Dynamic Schema Pruning**: The SQL Agent ONLY receives the schema for tables selected by the Planner, drastically reducing hallucination surface area.
-- **Structural Value Masking**: Training examples are programmatically masked (`WHERE col = '<VALUE>'`) to prevent the LLM from leaking example values (like 'JFK') into your queries.
-- **Automated Self-Correction**: Validator catches SQL errors and feeds them back to the SQL Agent for a targeted fix.
-- **Startup Caching**: Schema, FK relationships, and sample data are loaded once at startup — no repeated DB queries during planning.
-- **Auto-LIMIT Guard**: Queries without a `LIMIT` clause automatically get `LIMIT 10` appended to prevent massive result sets.
-- **Hybrid Table Selection**: Combines domain categories, keyword matching, and ChromaDB context to find relevant tables.
-- **Data-Aware Planning**: Real data samples are injected into the planner to prevent joining on empty/NULL columns.
+- **Tiered Multi-Model Orchestration (V2)**: Uses a fast 3B model (Architect) for planning and a powerful 6.7B model (SQL Engineer) for generation.
+- **SQL Pre-Validation Layer**: Code-level validator that fuzzy-matches table names, enforces alias consistency (e.g., `f.id` → `flight.id`), and auto-fixes hallucinated aliases.
+- **Dynamic Schema Pruning**: The SQL Agent ONLY receives the schema for tables selected by the Architect, minimizing hallucination surface area.
+- **Smart Context Relevancy**: Architect ignores irrelevant structural examples from ChromaDB to prevent "cross-pollination" errors.
+- **Poisoned Cache Bypass**: Support for `run(question, use_cache=False)` to force re-generation when semantic cache contains bad data.
+- **Automated Self-Correction**: Validator catches SQL errors and feeds them back to the SQL Agent for targeted retries.
+- **Auto-LIMIT Guard**: Queries without a `LIMIT` clause automatically get `LIMIT 10` appended.
 - **Fast Path Semantic Caching**: Recognizes semantically similar questions and returns cached results in <1s.
 - **FK-Aware SQL Generation**: The SQL Agent receives the full foreign key relationship graph, enabling correct multi-hop joins.
 - **Self-learning loop**: Successful question/SQL pairs are automatically stored back into ChromaDB.
@@ -43,6 +41,7 @@ graph TD
 
 | File/folder | Responsibility |
 |-------------|----------------|
+
 | `app.py` | Entry point with interactive CLI + `ask_question` helper |
 | `agent_pipeline.py` | Core 4-agent pipeline (Classifier, Planner, SQL, Validator) |
 | `connections.py` | Vanna/DB setup, connection pooling, and **Semantic Normalization Caching** |
@@ -137,6 +136,7 @@ Type `exit` or `quit` to stop.
 
 | Scenario | Use synthetic generator? | Why |
 |----------|--------------------------|-----|
+
 | First-time setup | ✅ Yes | Seeds ChromaDB with diverse examples quickly. |
 | Adding new tables | ✅ Yes | LLM learns new schema faster. |
 | Pattern failures (joins/filters) | ✅ Yes | Provide targeted examples. |

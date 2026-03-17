@@ -2,7 +2,6 @@ import os
 import json
 from datetime import datetime
 from dotenv import load_dotenv
-import vanna as vn
 from vanna.legacy.ollama import Ollama
 from vanna.legacy.chromadb import ChromaDB_VectorStore
 from sqlalchemy import create_engine
@@ -13,6 +12,10 @@ load_dotenv()
 
 # Global engine for connection pooling
 _engine = None
+
+def get_engine():
+    """Returns the global database engine."""
+    return _engine
 
 class MyVanna(ChromaDB_VectorStore, Ollama):
     def __init__(self, config=None):
@@ -41,6 +44,28 @@ class MyVanna(ChromaDB_VectorStore, Ollama):
                 return
 
         super().log(message, title)
+
+    def submit_prompt_with_model(self, prompt, model=None, **kwargs) -> str:
+        """Helper to allow different models per agent call."""
+        target_model = model if model else self.model
+        
+        # Log similar to how Vanna does it
+        self.log(
+            f"Ollama parameters (Overridden):\n"
+            f"model={target_model},\n"
+            f"options={self.ollama_options},\n"
+            f"keep_alive={self.keep_alive}"
+        )
+        
+        response_dict = self.ollama_client.chat(
+            model=target_model,
+            messages=prompt,
+            stream=False,
+            options=self.ollama_options,
+            keep_alive=self.keep_alive,
+        )
+
+        return response_dict["message"]["content"]
 
     def log_failure(self, question: str, sql: str, error: str):
         """Store failed SQL attempts in ChromaDB for later introspection."""
@@ -83,7 +108,8 @@ class MyVanna(ChromaDB_VectorStore, Ollama):
         def normalize(text):
             for word in fluff:
                 text = text.replace(f" {word} ", " ")
-                if text.startswith(word + " "): text = text[len(word)+1:]
+                if text.startswith(word + " "):
+                    text = text[len(word)+1:]
             return " ".join(text.split())
 
         if normalize(match_q) == normalize(query_q):
@@ -92,7 +118,7 @@ class MyVanna(ChromaDB_VectorStore, Ollama):
              try:
                  df = self.run_sql(best_match['sql'])
                  return best_match['sql'], df
-             except:
+             except Exception:
                  return None, None
         
         return None, None

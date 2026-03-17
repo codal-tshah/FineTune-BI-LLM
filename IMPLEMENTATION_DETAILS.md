@@ -35,10 +35,9 @@
 - **Problem**: A single-agent SQL generator often hallucinates columns (e.g., `login_email` instead of `login`) or struggles with complex joins.
 - **Solution**: Implemented a multi-agent orchestration in `agent_pipeline.py`.
 - **Agents**:
-  1. **Classifier Agent**: Categorizes queries into domains (FLIGHT, BOOKING, PASSENGER, etc.).
-  2. **Planner Agent**: Performs strict schema introspection of the categorized domain and generates a step-by-step SQL plan.
-  3. **SQL Agent**: Translates the plan into schema-qualified SQL with **Anti-Parameterization** guardrails.
-  4. **Validator Agent**: Runs the SQL, checks for errors, and triggers **Self-Correction** or **Self-Learning**.
+  1. **Architect Agent (3B)**: Merges classification & planning. Uses a faster model for schema mapping and strategy design.
+  2. **SQL Engineer (6.7B)**: Translates the plan into precise, schema-qualified SQL.
+  3. **Validator Agent**: Runs the SQL, checks for errors, and triggers **Self-Correction** or **Self-Learning**.
 
 ## 8. Automated Self-Correction
 
@@ -136,8 +135,8 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 
 ## 15. Auto-LIMIT Safety Guard
 
-- **Problem**: Unrestricted SELECTs on large tables (e.g., `boarding_pass` with 200k+ rows) hang the CLI and PgAdmin.
-- **Solution**: Appends `LIMIT 100` to any query lacking a LIMIT clause.
+- **Problem**: Unrestricted SELECTs on large tables hang the CLI.
+- **Solution**: Appends `LIMIT 10` (customizable) to any query lacking a LIMIT clause.
 
 ## 16. Dynamic Schema Pruning
 
@@ -158,8 +157,11 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 
 ## 19. Join Path Parsimony
 
-- **Problem**: The system sometimes took "long paths" (e.g., `flight` -> `booking_leg` -> `boarding_pass` -> `passenger`) when a shorter one (`flight` -> `booking_leg` -> `passenger`) was available.
-- **Solution**: Added a **Parsimony Rule** and **Shortest Path** instruction to the Planner, forcing it to look for direct ID matches (like `booking_id` appearing on both `booking_leg` and `passenger`) to minimize join complexity.
+- **Problem**: The system sometimes took "long paths" (e.g., `flight` -> `booking_leg` -> `boarding_pass` -> `passenger`) when a shorter one was available.
+- **Solution**: Added a **Parsimony Rule** and **Shortest Path** instruction to the Architect, forcing it to minimize join complexity.
+- **Smart Context Relevancy**: The Architect agent filters training examples from ChromaDB to ensure only keyword-relevant context is used, preventing cross-pollination.
+- **Alias Consistency Enforcement**: The Pre-Validator automatically fixes mismatched table/alias references (e.g., `flight.id` → `f.id`), preventing "missing FROM-clause" errors.
+- **Cache Bypass**: The `run()` method now accepts `use_cache=False` to force re-generation if the semantic cache contains poisoned data.
 
 ## Performance Notes (Mac 16GB RAM)
 
@@ -171,4 +173,3 @@ ChromaDB stores **Embeddings** (mathematical vectors) of:
 1. **6.7B Accuracy**: Hallucinations on complex queries still occur; SQL Pre-Validator and Schema Pruning catch ~90%.
 2. **PostgreSQL focus**: MySQL/SQLite support exists but is secondary.
 3. **No multi-turn context**: Each question is treated as a new session.
-
