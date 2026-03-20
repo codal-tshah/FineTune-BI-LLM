@@ -2,7 +2,6 @@ import os
 import json
 from datetime import datetime
 from dotenv import load_dotenv
-import vanna as vn
 from vanna.legacy.ollama import Ollama
 from vanna.legacy.chromadb import ChromaDB_VectorStore
 from sqlalchemy import create_engine
@@ -13,6 +12,10 @@ load_dotenv()
 
 # Global engine for connection pooling
 _engine = None
+
+def get_engine():
+    """Returns the global database engine."""
+    return _engine
 
 class MyVanna(ChromaDB_VectorStore, Ollama):
     def __init__(self, config=None):
@@ -41,6 +44,28 @@ class MyVanna(ChromaDB_VectorStore, Ollama):
                 return
 
         super().log(message, title)
+
+    def submit_prompt_with_model(self, prompt, model=None, **kwargs) -> str:
+        """Helper to allow different models per agent call."""
+        target_model = model if model else self.model
+        
+        # Log similar to how Vanna does it
+        self.log(
+            f"Ollama parameters (Overridden):\n"
+            f"model={target_model},\n"
+            f"options={self.ollama_options},\n"
+            f"keep_alive={self.keep_alive}"
+        )
+        
+        response_dict = self.ollama_client.chat(
+            model=target_model,
+            messages=prompt,
+            stream=False,
+            options=self.ollama_options,
+            keep_alive=self.keep_alive,
+        )
+
+        return response_dict["message"]["content"]
 
     def log_failure(self, question: str, sql: str, error: str):
         """Store failed SQL attempts in ChromaDB for later introspection."""
@@ -75,7 +100,10 @@ class MyVanna(ChromaDB_VectorStore, Ollama):
         # we do a slightly smarter check for key tokens.
         
         best_match = results[0]
-        match_q = best_match['question'].lower()
+        if not best_match or not isinstance(best_match, dict):
+            return None, None
+            
+        match_q = best_match.get('question', '').lower()
         query_q = question.lower()
         
         # Normalize: Remove common SQL-NL "fluff" words to check for core intent
@@ -83,7 +111,8 @@ class MyVanna(ChromaDB_VectorStore, Ollama):
         def normalize(text):
             for word in fluff:
                 text = text.replace(f" {word} ", " ")
-                if text.startswith(word + " "): text = text[len(word)+1:]
+                if text.startswith(word + " "):
+                    text = text[len(word)+1:]
             return " ".join(text.split())
 
         if normalize(match_q) == normalize(query_q):
@@ -92,7 +121,7 @@ class MyVanna(ChromaDB_VectorStore, Ollama):
              try:
                  df = self.run_sql(best_match['sql'])
                  return best_match['sql'], df
-             except:
+             except Exception:
                  return None, None
         
         return None, None
@@ -210,21 +239,41 @@ def get_relationships_query():
     schema = os.getenv("DB_SCHEMA", "public")
     
     if db_type == "postgres":
+        # return f"""
+        #     SELECT
+        #         tc.table_name, 
+        #         kcu.column_name, 
+        #         ccu.table_name AS foreign_table_name,
+        #         ccu.column_name AS foreign_column_name 
+        #     FROM 
+        #         information_schema.table_constraints AS tc 
+        #         JOIN information_schema.key_column_usage AS kcu
+        #           ON tc.constraint_name = kcu.constraint_name
+        #           AND tc.table_schema = kcu.table_schema
+        #         JOIN information_schema.constraint_column_usage AS ccu
+        #           ON ccu.constraint_name = tc.constraint_name
+        #           AND ccu.table_schema = tc.table_schema
+        #     WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema='{schema}';
+        # """
+
         return f"""
             SELECT
-                tc.table_name, 
-                kcu.column_name, 
+                tc.constraint_name,
+                tc.table_schema,
+                tc.table_name,
+                kcu.column_name,
+                ccu.table_schema AS foreign_table_schema,
                 ccu.table_name AS foreign_table_name,
-                ccu.column_name AS foreign_column_name 
-            FROM 
-                information_schema.table_constraints AS tc 
-                JOIN information_schema.key_column_usage AS kcu
-                  ON tc.constraint_name = kcu.constraint_name
-                  AND tc.table_schema = kcu.table_schema
-                JOIN information_schema.constraint_column_usage AS ccu
-                  ON ccu.constraint_name = tc.constraint_name
-                  AND ccu.table_schema = tc.table_schema
-            WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema='{schema}';
+                ccu.column_name AS foreign_column_name
+            FROM information_schema.table_constraints AS tc
+            JOIN information_schema.key_column_usage AS kcu
+            ON tc.constraint_name = kcu.constraint_name
+            AND tc.table_schema = kcu.table_schema
+            JOIN information_schema.constraint_column_usage AS ccu
+            ON ccu.constraint_name = tc.constraint_name
+            AND ccu.table_schema = tc.table_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+            AND tc.table_schema = '{schema}';
         """
     # Placeholder for other DBs
     return ""

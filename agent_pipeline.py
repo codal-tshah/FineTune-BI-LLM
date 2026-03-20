@@ -546,9 +546,647 @@ class AgenticSQLPipeline:
         print("Query executed successfully. Returning results...")
         return results
 
+# if __name__ == "__main__":
+#     agent = AgenticSQLPipeline()
+#     q = "Show me the top 5 airports by name in the US"
+#     df = agent.run(q)
+#     if df is not None:
+#         print(df.head())
+
+class AgenticSQLPipeline_V2:
+    def __init__(self):
+        self.vn = get_vanna_instance()
+        connect_database(self.vn)
+        self.schema_tables = self._load_schema_tables()
+        self.schema_map = self._build_schema_map()
+        # Cache expensive data at startup for speed
+        self._cached_rel_text = self._load_relationships()
+        self._cached_samples = self._load_samples()
+        self._cached_all_tables = list(self.schema_map.keys())
+
+        # MULTI-MODEL CONFIGURATION (Optimized for 16GB Mac)
+        self.models = {
+            "classifier": os.getenv("CLASSIFIER_MODEL", "gemma2:2b"),
+            "architect": os.getenv("ARCHITECT_MODEL", "qwen2.5-coder:3b"),
+            "sql": os.getenv("SQL_MODEL", "qwen2.5-coder:7b"),
+            "validator": os.getenv("VALIDATOR_MODEL", "qwen2.5-coder:3b")
+        }
+        print("[Pipeline] Tiered Orchestration active:")
+        print(f"  - Classifier: {self.models['classifier']}")
+        print(f"  - Architect:  {self.models['architect']}")
+        print(f"  - SQL Eng:    {self.models['sql']}")
+        print(f"  - Validator:  {self.models['validator']}")
+    
+    def get_table_columns(self, table_name):
+        """Fetch actual column metadata from database to prevent hallucination."""
+        try:
+            if connections.get_engine() is None:
+                return []
+            query = get_columns_query(table_name)
+            result = pd.read_sql(query, connections.get_engine())
+            return result['column_name'].tolist()
+        except Exception as e:
+            print(f"Warning: Could not fetch columns for {table_name}: {e}")
+            return []
+
+    def classifier_agent(self, question):
+        """
+        Phase 1: Quick classification to detect intent and domain.
+        Uses a very fast model (Gemma-2-2B).
+        """
+        print("[Classifier Agent] Identifying domain...")
+        prompt = f"""
+        User Question: {question}
+
+        Categories:
+        - FLIGHT: Flight status, times, schedules.
+        - BOOKING: Tickets, payments, price, seats.
+        - PASSENGER: People, accounts, profiles, loyalty.
+        - AIRPORT: Airport locations, countries, codes.
+        - MISC: General help, metadata, or greetings.
+
+        Task: Return only one word from the Categories list above.
+        """
+        response = self.vn.submit_prompt_with_model([{"role": "user", "content": prompt}], model=self.models["classifier"])
+        # Clean up tags like <|thought|> if they appear
+        clean = re.sub(r'<[^>]*>', '', response).strip().upper()
+        # Find the first mention of a category
+        match = re.search(r'(FLIGHT|BOOKING|PASSENGER|AIRPORT|MISC)', clean)
+        category = match.group(1) if match else "MISC"
+        print(f"[Classifier Agent] Result: {category}")
+        return category
+
+    def architect_agent(self, question, category="MISC"):
+        """
+        Phase 2: Planning. Uses a smaller, faster model (3B) for mapping question to schema.
+        Now utilizes the category from the Classifier Agent.
+        """
+        print(f"[Architect Agent] Designing query strategy for {category}...")
+        
+        # 1. Hybrid Table Selection Logic (Robust)
+        target_tables = set()
+        all_tables = self._cached_all_tables
+        
+        # A. Domain-Driven Expansion (Using determined category)
+        domain_mappings = {
+            "FLIGHT": ["flight", "booking_leg", "aircraft", "airport"],
+            "BOOKING": ["booking", "booking_leg", "boarding_pass", "passenger"],
+            "PASSENGER": ["passenger", "account", "frequent_flyer", "phone"],
+            "AIRPORT": ["airport", "flight"]
+        }
+        for t in domain_mappings.get(category, []):
+            if t in all_tables:
+                target_tables.add(t)
+
+        # B. Keyword matching (fail-safe)
+        question_words = set(re.findall(r'\w+', question.lower()))
+        for t in all_tables:
+            t_clean = t.replace('_', ' ')
+            if t in question_words or any(word in question.lower() for word in t_clean.split()):
+                target_tables.add(t)
+        
+        # B. Context-aware tables (from training examples)
+        training_data = self.vn.get_similar_question_sql(question)
+        clean_context = "No relevant examples found."
+        if training_data:
+            # ONLY use training data if it shares keywords with the question
+            valid_examples = []
+            question_lower = question.lower()
+            # Core domain keywords to ensure we don't pick up "flight" examples for "airport" questions
+            core_keywords = ["airport", "flight", "booking", "passenger", "account", "aircraft", "boarding_pass", "frequent_flyer"]
+            matched_keywords = [w for w in core_keywords if w in question_lower]
+            
+            for item in training_data:
+                if not isinstance(item, dict):
+                    continue
+                q_example = item.get('question', '').lower()
+                # STRENGTHENED RELEVANCY CHECK:
+                # The example must share AT LEAST TWO keywords from the question + matched core keywords
+                matched_count = sum(1 for w in matched_keywords if w in q_example)
+                
+                # If specific technical terms exist (miles, boarding_pass), the example MUST share them
+                tech_terms = ["mile", "boarding_pass", "velocity", "range", "seat", "checkin", "delay"]
+                active_tech = [t for t in tech_terms if t in question_lower]
+                tech_match = all(t in q_example for t in active_tech) if active_tech else True
+                
+                if matched_count < 1 or not tech_match:
+                    continue 
+                
+                valid_examples.append(item)
+                # Also extract tables from these relevant examples
+                sql_words = re.findall(r'[\w\"]+', item.get('sql', ''))
+                for word in sql_words:
+                    word_clean = word.strip('"').lower()
+                    if word_clean in all_tables:
+                        target_tables.add(word_clean)
+            
+            if valid_examples:
+                if clean_context == "No relevant examples found.": # Reset if we found anything
+                    clean_context = ""
+                context_parts = []
+                for item in valid_examples:
+                    # MASK BOTH STRINGS AND NUMBERS to prevent value leakage
+                    # Replaces 'JFK' with '<VALUE>' and numbers like 100 with <NUM>
+                    s_masked = re.sub(r"'(.*?)'", "'<VALUE>'", item.get('sql', ''))
+                    s_masked = re.sub(r"\b\d+\b", "<NUM>", s_masked)
+                    
+                    context_parts.append(f"Q: {item.get('question', 'N/A')}\nSQL: {s_masked}")
+                clean_context = "\n---\n".join(context_parts)
+
+        # C. Domain-Driven Expansion
+        domain_keywords = {
+            "flight": ["flight", "booking_leg"], # removed aircraft as it was causing count hallucinations
+            "departure": ["flight", "airport"],
+            "arrival": ["flight", "airport"],
+            "booking": ["booking", "booking_leg", "boarding_pass"],
+            "passenger": ["passenger", "account", "frequent_flyer", "booking_leg"],
+            "airport": ["airport"],
+            "aircraft": ["aircraft", "flight"]
+        }
+        for domain, tables in domain_keywords.items():
+            if domain in question.lower():
+                for t in tables:
+                    if t in all_tables:
+                        target_tables.add(t)
+
+        # D. Dynamic Protection & Domain Purge
+        
+        # SMART PROTECTION: Cross-reference question keywords with schema columns
+        protected_tables = set()
+        question_words = set(re.findall(r'\w+', question.lower()))
+        for t in target_tables:
+            if t in self.schema_map:
+                cols_str = " ".join(self.schema_map[t]).lower()
+                # 1. Direct Column Match: If question mentions a column name, protect the table
+                if any(word in cols_str for word in question_words if len(word) > 3):
+                    protected_tables.add(t)
+                # 2. Semantic Travel-Math: Protect distance/time tables for relevant questions
+                math_keywords = ["mile", "distance", "velocity", "duration", "time", "speed", "length"]
+                if any(kw in cols_str and kw in question.lower() for kw in math_keywords):
+                    protected_tables.add(t)
+
+        # Domain Purge: If question is about airports but NOT about flight mechanics/travel
+        if "airport" in question.lower() and not any(w in question.lower() for w in ["flight", "scheduled", "depart", "arrive"]):
+            for t in ["flight", "booking_leg", "boarding_pass", "booking"]:
+                if t in target_tables and t not in protected_tables:
+                    target_tables.remove(t)
+                    
+        # Domain Purge: If question is about account/passenger, remove flight noise if not travel-math
+        if any(w in question.lower() for w in ["account", "passenger", "frequent_flyer"]) and "flight" not in question.lower():
+            for t in ["flight", "aircraft", "airport"]:
+                if t in target_tables and t not in protected_tables:
+                    target_tables.remove(t)
+        # Strategic Fallback: If no tables matched via keywords, check if it's even relevant
+        if not target_tables:
+            if self._is_off_topic(question):
+                return "OFF_TOPIC"
+            
+            # If not off-topic but hazy, use primary tables as a starting point
+            primary_tables = ["flight", "airport", "account", "phone", "boarding_pass", "booking_leg", "aircraft", "booking", "passenger"]
+            target_tables = set(t for t in primary_tables if t in all_tables)
+
+        # 2. Build Table Context
+        table_context_str = ""
+        for t in sorted(list(target_tables)):
+            if t in self.schema_map:
+                cols = self.schema_map[t]
+                samples = self._cached_samples.get(t, "N/A")
+                table_context_str += f"\nTable: {t}\nColumns: {cols}\nSamples: {samples}\n"
+
+        prompt = f"""
+        Question: {question}
+        EXPLICIT SCHEMA REFERENCE:{table_context_str}
+        STRICT RELATIONSHIPS (JOIN PATHS):{self._cached_rel_text}
+        STRUCTURAL EXAMPLES (DO NOT COPY VALUES): {clean_context}
+        
+        Task: Create a step-by-step SQL JOIN plan.
+        CRITICAL RULES:
+        0. QUESTION IS KING: Focus exclusively on the requirements in the 'Question'. The 'STRUCTURAL EXAMPLES' are for syntax guidance only—DO NOT copy their filter values, columns, or logic if they differ from the question.
+        1. ONLY use tables/columns listed in EXPLICIT SCHEMA.
+        2. NO HALLUCINATION: Do not assume columns exist.
+        3. STRICT FILTER RULE: If the question says 'more than 3', use ' > 3'. DO NOT use values from examples (like '10' or '100').
+        4. RELEVANCY CHECK: Ignore 'STRUCTURAL EXAMPLES' that are not related to the current Question.
+        5. PARSIMONY RULE: Use the ABSOLUTE MINIMUM number of tables. 
+        6. EXPLICIT OVERRIDE: If the user mentions a specific table or metric in brackets (e.g., 'via boarding_pass'), YOU MUST use that table in your PLAN and TABLES list.
+        7. JOIN ENFORCEMENT: Every table in TABLES must have a JOIN_LOGIC entry.
+        8. IDENTIFIER GUIDE:
+           - To find a person by name/id: use 'passenger'.
+           - Counting flights for a passenger: passenger -> boarding_pass (count boarding_pass_id).
+           - Linking FLIGHT and PASSENGER: flight -> booking_leg -> passenger.
+           - Arrival vs Departure: 'arrivals' maps to arrival_airport, 'departures' maps to departure_airport.
+        
+        9. HUMAN-READABILITY RULE: When a user asks to "list", "show", or group by an entity (e.g., passenger, aircraft, airport, etc..), you MUST include descriptive columns in your plan (e.g., first_name, last_name, airport_name, model) instead of just IDs.
+        
+        Output Format:
+        CATEGORY: [FLIGHT|BOOKING|PASSENGER|AIRPORT|MISC]
+        TABLES: [table1, table2, table3]
+        JOIN_LOGIC: [table1.id = table2.id, table2.id = table3.id]
+        STEPS: [1. filter X, 2. join Y, 3. count Z]
+
+        CRITICAL AGGREGATION RULE:
+        - If the question contains "each", "per", or "by" (e.g., "per city", "each aircraft"), you MUST include a 'GROUP BY' step in your STEPS and specify the grouping column.
+        - Example Question: "Number of airports in each country" -> STEPS: [1. Count (*), 2. GROUP BY iso_country]
+        """
+        response = self.vn.submit_prompt_with_model([{"role": "user", "content": prompt}], model=self.models["architect"])
+        return response
+
+    def _is_off_topic(self, question):
+        """Checks if the question is related to the DB schema or is just general chat/noise."""
+        schema_summary = ", ".join(self.schema_tables[:10]) + "..."
+        prompt = f"""
+        You are a Database Assistant Guard.
+        SCHEMA CONTEXT: {schema_summary} (Airports, Flights, Passengers, Bookings, Aircraft).
+        USER QUESTION: "{question}"
+
+        TASK: Is this question related to the data in our database?
+        - If it's a greeting (hi, hello), general conversation, or a topic completely unrelated to aviation/passengers/bookings, return "OFF_TOPIC".
+        - If it's a question that *could* be answered by SQL (even if it's vague), return "AUTHORIZED".
+
+        OUTPUT: Return only "OFF_TOPIC" or "AUTHORIZED".
+        """
+        response = self.vn.submit_prompt_with_model([{"role": "user", "content": prompt}], model=self.models["architect"])
+        return "OFF_TOPIC" in response.upper()
+
+    def sql_agent(self, question, plan, previous_sql=None, error_message=None):
+        """
+        Phase 2: SQL Generation. Uses the heavy 6.7B model for precise coding.
+        Includes robust output cleaning and schema pruning.
+        """
+        print("[SQL Agent] Generating SQL based on plan...")
+        
+        correction_prompt = ""
+        if previous_sql and error_message:
+            correction_prompt = f"Previous attempt failed with error: {error_message}\nFailed SQL: {previous_sql}\nFix this error."
+
+        # Dynamic Schema Pruning
+        plan_tables = []
+        # Support both "TABLES: [t1, t2]" and "TABLES: t1, t2" formats
+        table_section = re.search(r'TABLES:\s*(?:\[)?([\w\s,]+)(?:\])?', plan, re.IGNORECASE)
+        if table_section:
+            plan_tables = [t.strip().lower() for t in table_section.group(1).replace('[','').replace(']','').split(',')]
+        
+        schema_ref = ""
+        tables_found = 0
+        for t in plan_tables:
+            if t in self.schema_map:
+                schema_ref += f"\n  {t}: [{', '.join(self.schema_map[t])}]"
+                tables_found += 1
+        
+        # Fallback to full schema if parsing failed
+        if tables_found == 0:
+            for t, cols in self.schema_map.items():
+                schema_ref += f"\n  {t}: [{', '.join(cols)}]"
+
+        prompt = f"""
+        Original Question: {question}
+        Verified Plan: {plan}
+        {correction_prompt}
+        PRUNED SCHEMA REFERENCE (ONLY USE THESE):{schema_ref}
+        JOIN PATH REFERENCE: {self._cached_rel_text}
+
+        Task: Write a single, valid standard SQL query.
+        - Use schema format: "{os.getenv('DB_SCHEMA', 'public')}"."table_name"
+        - DO NOT USE CTEs (WITH clauses).
+        - ALIAS CONSISTENCY: Every alias used MUST be defined in the FROM or JOIN clause.
+        - UNIQUE ALIASES: DO NOT use the same alias (e.g., 'p') for two different tables. Every table MUST have a unique alias.
+        - STRICT NO-FILTER HALLUCINATION: Do not add any WHERE filters for strings or dates (like 'John', '2023-01-01') that are NOT in the 'Original Question'.
+        - Follow the JOIN_LOGIC in the Plan strictly.
+        - HUMAN-READABLE OUTPUT: If the question asks to "list", "show", or group by an entity (like passengers, airports, or aircraft), always select their descriptive columns (e.g., first_name, last_name, airport_name, model) along with any IDs. Results with only IDs are considered poor quality.
+        - ONLY return SQL code.
+        """
+        response = self.vn.submit_prompt_with_model([{"role": "user", "content": prompt}], model=self.models["sql"])
+        
+        # --- ROBUST CLEANING ---
+        sql = re.sub(r'<[^>]*>', '', response) # Remove thinking tokens
+        # Note: Heavy hex stripping (UUIDs) moved to _validate_sql for safer context-aware cleaning.
+        
+        sql_match = re.search(r'```sql\n(.*?)\n```', sql, re.DOTALL | re.IGNORECASE)
+        if not sql_match:
+            sql_match = re.search(r'```(.*?)```', sql, re.DOTALL)
+        final_sql = sql_match.group(1).strip() if sql_match else sql.strip()
+
+        if "SELECT" in final_sql.upper():
+            start_pos = final_sql.upper().find("SELECT")
+            final_sql = final_sql[start_pos:]
+        
+        if "```" in final_sql:
+            final_sql = final_sql.split("```")[0].strip()
+
+        if ";" in final_sql:
+            parts = final_sql.split(";")
+            final_sql = parts[0] + ";"
+        
+        # Auto-LIMIT
+        if final_sql and 'LIMIT' not in final_sql.upper():
+            final_sql = final_sql.rstrip().rstrip(';') + "\nLIMIT 10;"
+
+        # --- CHARACTER NORMALIZATION ---
+        # Replace full-width characters hallucinated by some models (e.g. ＝ -> =)
+        final_sql = final_sql.replace('\uff1d', '=')
+        
+        return final_sql.strip()
+
+    def validator_agent(self, question, sql):
+        """Phase 3: Code-level safety + Execution + Self-Learning."""
+        print("[Validator Agent] Executing SQL...")
+        
+        # Safety Check (Regex with word boundaries to avoid blocking columns like update_ts)
+        forbidden = ["drop", "delete", "update", "insert", "truncate"]
+        for cmd in forbidden:
+            if re.search(rf'\b{cmd}\b', sql.lower()):
+                return None, f"Blocked: Forbidden command '{cmd}' detected.", False
+
+        try:
+            results = self.vn.run_sql(sql)
+            if results is not None and not results.empty:
+                print("[Self-Learning] Success. Auto-training...")
+                self.vn.train(question=question, sql=sql)
+                return results, None, True
+            return results, None, False
+        except Exception as e:
+            error_msg = str(e)
+            self.vn.log_failure(question, sql, error_msg)
+            return None, error_msg, False
+
+    def run(self, question, use_cache=True):
+        latencies = {}
+        start_time = time.time()
+
+        # --- Phase 0: Cache ---
+        if use_cache:
+            p0_start = time.time()
+            self.log_stage("Phase 0 - Cache", "Checking semantic cache")
+            _, cached_results = self.vn.get_cached_query(question)
+            latencies["cache"] = time.time() - p0_start
+            if cached_results is not None:
+                return cached_results
+
+        # --- Phase 1: Classifier (2B) ---
+        p_c_start = time.time()
+        category = self.classifier_agent(question)
+        latencies["classifier"] = time.time() - p_c_start
+        
+        # --- Phase 2: Architect (3B) ---
+        p1_start = time.time()
+        plan = self.architect_agent(question, category=category)
+        
+        # OFF-TOPIC GUARD
+        if "OFF_TOPIC" in plan.upper():
+            print("\n" + "!"*50)
+            print("🚫 OFF-TOPIC QUERY REJECTED")
+            print("!"*50)
+            print(f"Question: {question}")
+            print("-" * 50)
+            print("I can only answer questions related to the 'Postgres Air' database.")
+            print("This includes data about: Flights, Passengers, Bookings, Accounts, and Aircraft.")
+            print("Please ask a valid data-related question.")
+            print("!"*50 + "\n")
+            return None
+
+        latencies["architect"] = time.time() - p1_start
+        self.log_stage("Phase 1 - Architect", "Strategy designed")
+
+        # --- Phase 2: SQL Engineer (6.7B) ---
+        p2_start = time.time()
+        sql = self.sql_agent(question, plan)
+        sql = self._ensure_schema_qualified(sql)
+        sql = self._validate_sql(sql)
+        latencies["sql_gen"] = time.time() - p2_start
+        self.log_stage("Phase 2 - SQL", "SQL Generated")
+
+        # --- Phase 3: Validation ---
+        p3_start = time.time()
+        results, error, trained = self.validator_agent(question, sql)
+        
+        # Self-Correction Loop
+        if error:
+            self.log_stage("Phase 3 - Validator", "Error found, retrying...", error)
+            p2_retry = time.time()
+            sql = self.sql_agent(question, plan, previous_sql=sql, error_message=error)
+            sql = self._ensure_schema_qualified(sql)
+            sql = self._validate_sql(sql)
+            results, error, trained = self.validator_agent(question, sql)
+            latencies["sql_retry"] = time.time() - p2_retry
+
+        latencies["validation"] = time.time() - p3_start
+        total_time = time.time() - start_time
+        latencies["total"] = total_time
+
+        # Metrics
+        metrics = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "question": question,
+            "sql": sql,
+            "success": results is not None,
+            "error": error,
+            "latencies": latencies
+        }
+        with open("metrics.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(metrics) + "\n")
+        
+        if error:
+            print(f"\n🛑 Error: {error}")
+            return None
+            
+        self.log_stage("Phase 3 - Validator", "Success", f"Total: {total_time:.1f}s")
+        
+        # --- ENHANCED READABILITY OUTPUT ---
+        print("\n" + "="*50)
+        print("📊 FINAL QUERY RESULTS")
+        print("="*50)
+        print(f"Question: {question}")
+        print("-" * 50)
+        print("🔍 GENERATED SQL (Copy to PgAdmin):")
+        print("\n```sql")
+        print(sql)
+        print("```\n")
+        
+        # Write to a helper file for easy copy-paste
+        try:
+            with open("latest_query.sql", "w", encoding="utf-8") as f:
+                f.write(f"-- Question: {question}\n{sql}")
+            print("💡 Tip: You can also find this SQL in 'latest_query.sql'")
+        except Exception:
+            pass
+
+        print("-" * 50)
+        print("📈 RESULTS TABLE:")
+        if results is not None:
+            if isinstance(results, pd.DataFrame) and not results.empty:
+                print(results.to_string(index=False))
+            elif isinstance(results, pd.DataFrame):
+                print("No data found.")
+            else:
+                print(f"Unexpected results format: {type(results)}")
+        else:
+            print("Execution failed or no results.")
+        print("="*50 + "\n")
+        
+        return results
+
+    def log_stage(self, stage, status, detail=None):
+        detail_str = f" ({detail})" if detail else ""
+        print(f"[Workflow] {stage}: {status}{detail_str}")
+
+    def _load_schema_tables(self):
+        try:
+            query = get_schema_query()
+            tables = pd.read_sql(query, connections.get_engine())["table_name"].tolist()
+            return sorted(set(tables), key=len, reverse=True)
+        except Exception:
+            return []
+
+    def _build_schema_map(self):
+        schema_map = {}
+        for table in self.schema_tables:
+            cols = self.get_table_columns(table)
+            if cols:
+                schema_map[table] = cols
+        return schema_map
+
+    def _load_relationships(self):
+        try:
+            rel_df = pd.read_sql(connections.get_relationships_query(), connections.get_engine())
+            if not rel_df.empty:
+                return rel_df.to_string(index=False)
+            return "None"
+        except Exception:
+            return "None"
+
+    def _load_samples(self):
+        samples = {}
+        for table in self.schema_tables:
+            try:
+                sample_df = pd.read_sql(connections.get_data_samples_query(table, limit=3), connections.get_engine())
+                samples[table] = sample_df.to_dict('records')
+            except Exception:
+                samples[table] = "N/A"
+        return samples
+
+    def _validate_sql(self, sql):
+        """
+        Code-level SQL pre-validator. Catches and fixes common LLM errors:
+        1. Fuzzy-match misspelled/truncated table names
+        2. Validate column references against actual schema (Alias-aware)
+        """
+        if not self.schema_map or not sql:
+            return sql
+
+        schema = os.getenv("DB_SCHEMA", "public")
+        valid_tables = list(self.schema_map.keys())
+        fixed_sql = sql
+
+        # --- PRE-STEP: Heal Hex Corruption & Gibberish ---
+        # Detect and strip hex junk mashups like "flight67e1a0f5_id" -> "flight_id"
+        # and stand-alone long hex strings from token leakage
+        gibberish_pattern = r'[a-fA-F0-9]{12,}'
+        words = re.findall(r'\b\w+\b', fixed_sql)
+        for word in words:
+            if re.search(gibberish_pattern, word):
+                # If it's a mix of hex and text, strip the hex part
+                if re.search(r'[g-zG-Z_]', word):
+                    clean_word = re.sub(gibberish_pattern, '', word)
+                    # Handle the case where stripping hex leaves double underscores or a trailing underscore
+                    clean_word = re.sub(r'_{2,}', '_', clean_word).strip('_')
+                    if clean_word and clean_word != word:
+                        fixed_sql = re.sub(rf'\b{word}\b', clean_word, fixed_sql)
+                # If it's strictly a long hex, it's likely token leakage; delete it (risky, but better than syntax error)
+                elif len(word) >= 30:
+                    fixed_sql = re.sub(rf'\b{word}\b', '', fixed_sql)
+
+        # Final safety: strip any hanging dots (e.g. "f. = bl.") caused by the above or LLM error
+        fixed_sql = re.sub(r'\b([a-zA-Z_]\w*)\.\s*([=<>])', r'\1_id \2', fixed_sql) # Try to guess common missing PKs
+        fixed_sql = re.sub(r'([a-zA-Z_]\w*)\.\s+(?=[^a-zA-Z_])', r'\1', fixed_sql) # Remove trailing dot before operator
+
+        # --- Step 1: Fix misspelled/truncated table names ---
+        table_refs = re.findall(rf'(?:"{schema}"\."|{schema}\.)([a-zA-Z_]\w*)', fixed_sql)
+        standalone_refs = re.findall(r'(?:FROM|JOIN)\s+(?:"?[\w]+"?\.)?"?([a-zA-Z_]\w*)"?', fixed_sql, re.IGNORECASE)
+        all_table_refs = set(table_refs + standalone_refs)
+
+        for ref in all_table_refs:
+            ref_clean = ref.strip('"').lower()
+            if ref_clean in valid_tables or ref_clean == schema:
+                continue
+            matches = difflib.get_close_matches(ref_clean, valid_tables, n=1, cutoff=0.5)
+            if matches:
+                correct_table = matches[0]
+                print(f"[SQL Pre-Validator] Fixing table: '{ref}' → '{correct_table}'")
+                fixed_sql = re.sub(rf'(?<![a-zA-Z_]){re.escape(ref)}(?![a-zA-Z_])', correct_table, fixed_sql)
+
+        # Build table -> alias and alias -> table maps (Catching duplicates)
+        alias_to_table = {}
+        alias_pattern = re.findall(
+            r'(?:FROM|JOIN)\s+(?:"?[a-zA-Z_]\w*"?\.)?"?([a-zA-Z_]\w*)"?\s+(?:AS\s+)?([a-zA-Z_]\w*)',
+            fixed_sql,
+            re.IGNORECASE
+        )
+        for table_ref, alias in alias_pattern:
+            table_clean = table_ref.strip('"').lower()
+            alias_clean = alias.strip('"').lower()
+            if alias_clean in ('on', 'where', 'group', 'order', 'limit', 'having', 'and', 'or', 'as', 'join', 'inner', 'left', 'right', 'full'):
+                continue
+            
+            # DETECT DUPLICATE ALIASES: If 'p' is already used for 'phone', and now 'passenger' wants 'p'
+            if alias_clean in alias_to_table and alias_to_table[alias_clean] != table_clean:
+                new_alias = f"{alias_clean}2"
+                print(f"[SQL Pre-Validator] Duplicate Alias Conflict: Renaming '{table_clean}' alias '{alias_clean}' → '{new_alias}'")
+                # Sophisticated replacement for the definition only
+                fixed_sql = re.sub(rf'\b{re.escape(alias_clean)}\b(?=\s+ON\b|\s+JOIN\b|\s+WHERE\b|\s+GROUP\b)', new_alias, fixed_sql, count=1, flags=re.IGNORECASE)
+                alias_clean = new_alias
+
+            if table_clean in self.schema_map:
+                alias_to_table[alias_clean] = table_clean
+
+        # --- Step 2: Validate column references (qualifier.column) ---
+        col_refs = re.findall(r'([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)', fixed_sql)
+        for qualifier, column in col_refs:
+            q_lower = qualifier.strip('"').lower()
+            c_lower = column.strip('"').lower()
+            if q_lower == schema: continue
+
+            # Resolve qualifier (now likely an alias) to table
+            actual_table = alias_to_table.get(q_lower, q_lower)
+
+            if actual_table not in self.schema_map:
+                # Fuzzy matching hallucinated aliases
+                alias_matches = difflib.get_close_matches(q_lower, list(alias_to_table.keys()), n=1, cutoff=0.7)
+                if alias_matches:
+                    q_lower = alias_matches[0]
+                    actual_table = alias_to_table[q_lower]
+                    print(f"[SQL Pre-Validator] Hallucinated Alias: Fixing '{qualifier}' → '{q_lower}'")
+                    fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{q_lower}.{column}")
+
+            if actual_table in self.schema_map:
+                valid_columns = self.schema_map[actual_table]
+                valid_columns_lower = [c.lower() for c in valid_columns]
+
+                if c_lower not in valid_columns_lower:
+                    matches = difflib.get_close_matches(c_lower, valid_columns_lower, n=1, cutoff=0.6)
+                    if matches:
+                        correct_col = valid_columns[valid_columns_lower.index(matches[0])]
+                        print(f"[SQL Pre-Validator] Fixing column: '{qualifier}.{column}' → '{qualifier}.{correct_col}'")
+                        fixed_sql = fixed_sql.replace(f"{qualifier}.{column}", f"{qualifier}.{correct_col}")
+        
+        # --- Step 3: Strip illegal schema-qualified aliases ---
+        schema = os.getenv("DB_SCHEMA", "public")
+        fixed_sql = re.sub(rf'AS\s+"{schema}"\."([a-zA-Z_]\w*)"', r'AS \1', fixed_sql, flags=re.IGNORECASE)
+
+        return fixed_sql
+
+    def _ensure_schema_qualified(self, sql):
+        """Rewrites unqualified table names to include the schema, avoiding aliases."""
+        if not self.schema_tables: return sql
+        schema = os.getenv("DB_SCHEMA", "public")
+        qualified_sql = sql
+        for table in self.schema_tables:
+            # Lookbehind to ensure not preceded by 'AS ' or '.' or '"'
+            # Lookahead to ensure not followed by '.' or '"'
+            pattern = rf'(?<!(?i:AS)\s)(?<![\w\.\"]){re.escape(table)}(?![\w\.\"])'
+            qualified_sql = re.sub(pattern, f'"{schema}"."{table}"', qualified_sql)
+        return qualified_sql
+
 if __name__ == "__main__":
-    agent = AgenticSQLPipeline()
-    q = "Show me the top 5 airports by name in the US"
-    df = agent.run(q)
-    if df is not None:
-        print(df.head())
+    agent = AgenticSQLPipeline_V2()
+    # Test complex query
+    # print(agent.run("names of all passengers on flight id 100"))
+    print(agent.run("Find aircrafts are used in more than 12000 flights"))
